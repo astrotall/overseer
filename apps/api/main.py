@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from apps.api.routes import api_router
+from libs.core.config import get_settings
+from libs.core.logging import configure_logging, get_logger
+from libs.db.redis import close_redis, init_redis
+from libs.db.session import close_engine, init_engine
+
+logger = get_logger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    configure_logging(settings)
+
+    init_engine(settings)
+    redis = init_redis(settings)
+    await redis.ping()
+    logger.info("api.startup", env=settings.env)
+
+    try:
+        yield
+    finally:
+        await close_redis()
+        await close_engine()
+        logger.info("api.shutdown")
+
+
+def create_app() -> FastAPI:
+    settings = get_settings()
+    app = FastAPI(
+        title="Overseer API",
+        version="0.1.0",
+        description="Системный ИИ-агент: REST + WebSocket интерфейс",
+        debug=settings.debug,
+        lifespan=lifespan,
+    )
+    app.include_router(api_router)
+    return app
+
+
+app = create_app()

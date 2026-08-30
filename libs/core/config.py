@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+Env = Literal["local", "dev", "prod"]
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=BASE_DIR / ".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    env: Env = "local"
+    debug: bool = False
+    log_level: str = "INFO"
+    log_json: bool = False
+
+    database_url: str = "postgresql+asyncpg://overseer:overseer@localhost:55432/overseer"
+    redis_url: str = "redis://localhost:56379/0"
+    database_url_test: str | None = Field(
+        default=None,
+        description=(
+            "БД для тестов. Если не задана, тесты берут database_url и подставляют "
+            "имя базы с суффиксом _test — рабочая база никогда не используется."
+        ),
+    )
+
+    anthropic_api_key: str | None = None
+    deepseek_api_key: str | None = None
+    deepseek_base_url: str = "https://api.deepseek.com"
+
+    api_host: str = "0.0.0.0"
+    api_port: int = 8000
+    db_echo: bool = Field(default=False, description="Логировать SQL-запросы SQLAlchemy")
+
+    @property
+    def is_prod(self) -> bool:
+        return self.env == "prod"
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()

@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "ru-RU"
+tone_instructions: >-
+  Ищи логические баги, дублирование, мёртвый код, проблемы безопасности.
+  Не повторяй находки ruff и mypy — они уже в CI. Комментариев и docstring'ов
+  в коде нет по конвенции проекта — не предлагай их добавить. Пиши коротко.
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  poem: false
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!**/uv.lock"
+    - "!alembic/versions/**"
+  path_instructions:
+    - path: "apps/**"
+      instructions: >-
+        Не дублируй находки ruff и mypy strict — они уже в CI. Правила проекта:
+        комментариев и docstring'ов в коде нет; строгая типизация, без Any без
+        необходимости; apps/ может импортировать libs/, но не наоборот. Для
+        нового tool'а для LLM function calling проверяй, что реализация в
+        libs/tools и регистрация в libs/llm/tools добавлены в одном PR.
+    - path: "libs/**"
+      instructions: >-
+        Не дублируй находки ruff и mypy strict — они уже в CI. libs/ не должен
+        импортировать apps/ — направление зависимостей только вниз. Новая
+        SQLAlchemy-модель без парной Alembic-миграции в том же PR — это баг,
+        отмечай явно. Новое поле в Settings (libs/core/config.py) без
+        соответствующего ключа в .env.example — тоже отмечай.
+  tools:
+    ruff:
+      enabled: false
+    gitleaks:
+      enabled: true
+finishing_touches:
+  docstrings:
+    enabled: false
+pre_merge_checks:
+  docstrings:
+    mode: "off"
+chat:
+  auto_reply: true
+knowledge_base:
+  jira:
+    usage: "enabled"
+    project_keys:
+      - "OVE"
