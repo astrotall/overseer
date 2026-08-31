@@ -56,6 +56,53 @@ INVALID_MESSAGES: list[tuple[str, dict[str, Any]]] = [
     ("extra_field_forbidden", {"role": "user", "content": "привет", "name": "write_document"}),
 ]
 
+VALID_RESPONSES: list[tuple[str, dict[str, Any]]] = [
+    (
+        "tool_use_with_tool_calls",
+        {
+            "model": "claude-sonnet-5",
+            "stop_reason": "tool_use",
+            "tool_calls": [ToolCall(id="c1", name="search", arguments={})],
+        },
+    ),
+    (
+        "end_turn_without_tool_calls",
+        {"model": "claude-sonnet-5", "stop_reason": "end_turn", "text": "готово"},
+    ),
+    (
+        "content_filter_without_tool_calls",
+        {"model": "claude-sonnet-5", "stop_reason": "content_filter"},
+    ),
+    (
+        "max_tokens_without_tool_calls",
+        {"model": "claude-sonnet-5", "stop_reason": "max_tokens", "text": "часть отве"},
+    ),
+]
+
+INVALID_RESPONSES: list[tuple[str, dict[str, Any]]] = [
+    (
+        "tool_use_without_tool_calls",
+        {"model": "claude-sonnet-5", "stop_reason": "tool_use"},
+    ),
+    (
+        "end_turn_with_tool_calls",
+        {
+            "model": "claude-sonnet-5",
+            "stop_reason": "end_turn",
+            "text": "готово",
+            "tool_calls": [ToolCall(id="c1", name="search", arguments={})],
+        },
+    ),
+    (
+        "content_filter_with_tool_calls",
+        {
+            "model": "claude-sonnet-5",
+            "stop_reason": "content_filter",
+            "tool_calls": [ToolCall(id="c1", name="search", arguments={})],
+        },
+    ),
+]
+
 
 @pytest.mark.parametrize(
     "kwargs",
@@ -121,3 +168,33 @@ def test_llm_response_to_message_drops_empty_text() -> None:
     )
 
     assert response.to_message().content is None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [kwargs for _, kwargs in VALID_RESPONSES],
+    ids=[case for case, _ in VALID_RESPONSES],
+)
+def test_llm_response_accepts_consistent_stop_reason(kwargs: dict[str, Any]) -> None:
+    response = LLMResponse(**kwargs)
+    assert response.has_tool_calls == (response.stop_reason == "tool_use")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [kwargs for _, kwargs in INVALID_RESPONSES],
+    ids=[case for case, _ in INVALID_RESPONSES],
+)
+def test_llm_response_rejects_inconsistent_stop_reason(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        LLMResponse(**kwargs)
+
+
+def test_llm_response_to_message_keeps_empty_text_without_tool_calls() -> None:
+    response = LLMResponse(model="claude-sonnet-5", stop_reason="content_filter")
+
+    message = response.to_message()
+
+    assert response.has_tool_calls is False
+    assert message.role == "assistant"
+    assert message.content == ""

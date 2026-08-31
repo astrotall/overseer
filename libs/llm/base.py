@@ -84,16 +84,27 @@ class LLMResponse(BaseModel):
     usage: Usage | None = None
     raw: dict[str, Any] | None = None
 
+    @model_validator(mode="after")
+    def _check_stop_reason_shape(self) -> Self:
+        if self.stop_reason == "tool_use":
+            if not self.tool_calls:
+                raise ValueError("stop_reason='tool_use' требует непустой tool_calls")
+        elif self.tool_calls:
+            raise ValueError("tool_calls допустимы только при stop_reason='tool_use'")
+        return self
+
     @property
     def has_tool_calls(self) -> bool:
         return bool(self.tool_calls)
 
     def to_message(self) -> ChatMessage:
-        return ChatMessage(
-            role="assistant",
-            content=self.text or None,
-            tool_calls=list(self.tool_calls),
-        )
+        if self.tool_calls:
+            return ChatMessage(
+                role="assistant",
+                content=self.text or None,
+                tool_calls=list(self.tool_calls),
+            )
+        return ChatMessage(role="assistant", content=self.text)
 
 
 class LLMClient(ABC):
