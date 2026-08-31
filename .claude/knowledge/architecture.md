@@ -63,10 +63,86 @@ HTTP-сервер на стороне executor. Детали — в `apps/execut
 | `libs/tools` | реестр инструментов агента — описание для function calling + исполнитель |
 | `libs/schemas` | Pydantic v2 DTO |
 
-`libs/llm/base.py` задаёт нейтральные примитивы, к которым приводятся все провайдеры:
-`ChatMessage` (роли `system` / `user` / `assistant` / `tool`), `ToolSpec` (`name`,
-`description`, `input_schema` — JSON Schema аргументов, обычно из `model_json_schema()`
-Pydantic-модели), `ToolCall`. Реализации клиентов пока заготовки: генерация не написана.
+### Контракт `libs/llm/base.py`
+
+Зафиксирован (OVE-8). Это нейтральные примитивы, к которым адаптеры приводят оба формата
+tool-calling: блоки `tool_use` / `tool_result` у Anthropic и function calls у
+OpenAI-совместимых API (DeepSeek — активный провайдер v1). Менять эти типы — ломающее
+изменение: правятся все адаптеры разом.
+
+**`ChatMessage`** — одно сообщение истории, плоская форма вместо списка блоков:
+
+| Поле | Когда заполнено |
+|---|---|
+| `role` | `system` / `user` / `assistant` / `tool` |
+| `content` | текст; `None` допустим только у `assistant`, который вызвал инструмент и ничего не сказал |
+| `tool_calls` | только у `assistant` — список `ToolCall` |
+| `tool_call_id` | только у `tool` — id вызова, на который отвечает это сообщение |
+| `is_error` | только у `tool` — инструмент упал, в `content` текст ошибки |
+
+Форма проверяется `model_validator`'ом, лишние поля запрещены (`extra="forbid"`): собрать
+сообщение неверной формы нельзя, ошибка вылезет на конструкторе, а не в ответе провайдера.
+
+Плоская форма выбрана потому, что она разворачивается в блоки без потерь, а обратно —
+нет. Отсюда обязанности адаптеров:
+
+- **OpenAI-совместимые** (DeepSeek): маппинг почти прямой — `tool_calls` и `role="tool"` с
+  `tool_call_id` есть в самом API; `is_error` в протоколе нет, ошибка едет обычным текстом
+  в `content`.
+- **Anthropic**: `assistant` разворачивается в `[TextBlock, ToolUseBlock, ...]`; идущие
+  подряд сообщения `role="tool"` собираются в **одно** `user`-сообщение с несколькими
+  `tool_result`-блоками (иначе параллельные вызовы не примутся), `is_error` ложится в
+  `tool_result.is_error`; сообщения `role="system"` не отправляются в список сообщений, а
+  поднимаются в отдельный параметр `system` запроса.
+
+**`ToolCall`** — `id`, `name`, `arguments` (уже распарсенный dict; у OpenAI-формата
+аргументы приезжают строкой JSON — разбирает адаптер, наружу строка не выходит).
+
+**`ToolSpec`** — `name`, `description`, `input_schema` (JSON Schema аргументов). Имя поля
+совпадает с полем нативного Anthropic API (`tools[].input_schema`) — причина именно в
+этом, а не в каком-либо правиле репозитория; для OpenAI-формата адаптер кладёт ту же
+схему в `function.parameters`. Конструктор `ToolSpec.from_model(name, description, ArgsModel)`
+делает схему из Pydantic-модели аргументов — этим будет пользоваться реестр инструментов
+(OVE-21), отдавая наружу готовый список `ToolSpec`; сам реестр живёт в `libs/tools`, в
+`libs/llm` его нет.
+
+**`LLMResponse`** — `model`, `stop_reason`, `text`, `tool_calls`, `usage`, `raw`. Два
+исхода различаются явно: `stop_reason="tool_use"` и непустой `tool_calls` (есть свойство
+`has_tool_calls`) — модель просит вызвать инструменты; `stop_reason="end_turn"` — финальный
+текст. `StopReason` — общий для провайдеров литерал `end_turn` / `tool_use` /
+`max_tokens` / `stop_sequence` / `content_filter`, в него адаптер укладывает и `finish_reason`
+OpenAI, и `stop_reason` Anthropic. `usage` (входные и выходные токены) заполняется для
+аудита и стоимости, `raw` — сырой ответ провайдера для отладки. `to_message()` собирает
+из ответа `assistant`-сообщение для дописывания в историю вместе с `tool_calls` —
+цикл агента не должен делать это руками и терять вызовы.
+
+**`LLMClient.complete()`** — единственный метод контракта:
+
+```python
+async def complete(
+    self,
+    messages: Sequence[ChatMessage],
+    *,
+    tools: Sequence[ToolSpec] | None = None,
+    model: str | None = None,
+    max_tokens: int = 4096,
+    temperature: float | None = None,
+) -> LLMResponse: ...
+```
+
+`model=None` — берётся `default_model` клиента. Остальные параметры keyword-only намеренно:
+добавить следующий (`tool_choice`, `stop_sequences`) можно, не ломая вызовы. Плюс
+неабстрактный `aclose()` для закрытия HTTP-клиента.
+
+**Стриминга в v1 нет и метода `stream()` в контракте нет.** Не «отложенная заглушка», а
+осознанное отсутствие: абстрактный метод заставил бы каждого клиента писать мёртвый
+override, а токены всё равно некуда стримить — WebSocket-протокол ещё не зафиксирован (см.
+ниже), и первый рабочий цикл «запрос → инструмент → ответ» синхронного `complete()`
+полностью закрывает. Стриминг приедет отдельной задачей вместе с форматом WS-сообщений и
+добавит `stream()` рядом с `complete()`, не меняя типы.
+
+Реализации клиентов (`AnthropicClient`, `DeepSeekClient`) пока заготовки: конструкторы
+проверяют ключ, `complete()` кидает `NotImplementedError` — это следующие задачи.
 
 `libs/tools` пуст. Инструменты, требующие Windows/COM/Playwright, будут исполняться в
 `apps/executor` — сюда попадёт только их описание и прокси-вызов.
