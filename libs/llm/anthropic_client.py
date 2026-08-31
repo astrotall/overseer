@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from libs.core.config import Settings, get_settings
 from libs.core.exceptions import ConfigurationError
 from libs.llm.base import ChatMessage, LLMClient, LLMResponse, ToolSpec
@@ -16,10 +18,11 @@ class AnthropicClient(LLMClient):
 
     async def complete(
         self,
-        messages: list[ChatMessage],
+        messages: Sequence[ChatMessage],
         *,
-        tools: list[ToolSpec] | None = None,
+        tools: Sequence[ToolSpec] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,
+        temperature: float | None = None,
     ) -> LLMResponse:
         raise NotImplementedError("Клиент Anthropic будет реализован отдельной задачей")

@@ -37,12 +37,12 @@ reviews:
       enabled: false
     gitleaks:
       enabled: true
-finishing_touches:
-  docstrings:
-    enabled: false
-pre_merge_checks:
-  docstrings:
-    mode: "off"
+  finishing_touches:
+    docstrings:
+      enabled: false
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
 chat:
   auto_reply: true
 knowledge_base:
