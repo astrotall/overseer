@@ -157,6 +157,68 @@ async def test_exhausted_retries_raise_transient() -> None:
     await client.aclose()
 
 
+async def test_retries_insufficient_system_resource_then_succeeds() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return httpx.Response(
+                200,
+                json={
+                    "model": "deepseek-chat",
+                    "choices": [
+                        {
+                            "finish_reason": "insufficient_system_resource",
+                            "message": {"role": "assistant", "content": None},
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-chat",
+                "choices": [
+                    {"finish_reason": "stop", "message": {"role": "assistant", "content": "ок"}}
+                ],
+            },
+        )
+
+    client = _client(httpx.MockTransport(handler))
+    result = await client.complete([ChatMessage(role="user", content="привет")])
+    assert result.text == "ок"
+    assert calls == 3
+    await client.aclose()
+
+
+async def test_exhausted_insufficient_system_resource_raise_transient() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "finish_reason": "insufficient_system_resource",
+                        "message": {"role": "assistant", "content": None},
+                    }
+                ],
+            },
+        )
+
+    client = _client(httpx.MockTransport(handler), max_retries=2)
+    with pytest.raises(LLMTransientError, match="не хватило ресурсов"):
+        await client.complete([ChatMessage(role="user", content="привет")])
+    assert calls == 3
+    await client.aclose()
+
+
 async def test_tool_calls_finish_reason_without_calls_is_response_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

@@ -105,7 +105,11 @@ class DeepSeekClient(LLMClient):
                 raise LLMError(f"Некорректный запрос к DeepSeek: {exc}") from exc
 
             if response.is_success:
-                return _load_json(response)
+                payload = _load_json(response)
+                if not last_attempt and _has_insufficient_resources(payload):
+                    await asyncio.sleep(self._backoff(attempt))
+                    continue
+                return payload
 
             if response.status_code in _RETRYABLE_STATUS and not last_attempt:
                 await asyncio.sleep(self._backoff(attempt, response))
@@ -168,6 +172,16 @@ def _load_json(response: httpx.Response) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise LLMResponseError("DeepSeek вернул JSON неожиданной формы (ожидался объект)")
     return data
+
+
+def _has_insufficient_resources(payload: dict[str, Any]) -> bool:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return False
+    return choice.get("finish_reason") == "insufficient_system_resource"
 
 
 def _decode_response(data: dict[str, Any]) -> LLMResponse:
