@@ -2,6 +2,10 @@ from libs.core.config import Settings, get_settings
 from libs.core.exceptions import (
     ConfigurationError,
     ExternalServiceError,
+    LLMBadRequestError,
+    LLMError,
+    LLMResponseError,
+    LLMTransientError,
     NotFoundError,
     OverseerError,
 )
@@ -9,6 +13,10 @@ from libs.core.exceptions import (
 __all__ = [
     "ConfigurationError",
     "ExternalServiceError",
+    "LLMBadRequestError",
+    "LLMError",
+    "LLMResponseError",
+    "LLMTransientError",
     "NotFoundError",
     "OverseerError",
     "Settings",

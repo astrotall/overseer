@@ -19,3 +19,19 @@ class NotFoundError(OverseerError):
 
 class ExternalServiceError(OverseerError):
     default_message = "Ошибка внешнего сервиса"
+
+
+class LLMError(ExternalServiceError):
+    default_message = "Ошибка LLM-провайдера"
+
+
+class LLMTransientError(LLMError):
+    default_message = "Временный сбой LLM-провайдера, запрос можно повторить"
+
+
+class LLMBadRequestError(LLMError):
+    default_message = "LLM-провайдер отклонил запрос"
+
+
+class LLMResponseError(LLMError):
+    default_message = "LLM-провайдер вернул ответ неожиданной формы"
