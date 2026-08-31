@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-chat"
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000
