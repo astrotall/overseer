@@ -154,6 +154,23 @@ async def test_retries_transient_then_succeeds() -> None:
     await client.aclose()
 
 
+async def test_retries_on_429_then_succeeds() -> None:
+    calls = 0
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return httpx2.Response(429, headers={"retry-after": "0.01"}, text="rate limited")
+        return httpx2.Response(200, json=_message_response(text="ок"))
+
+    client = _client(httpx2.MockTransport(handler), max_retries=5)
+    result = await client.complete([ChatMessage(role="user", content="привет")])
+    assert result.text == "ок"
+    assert calls == 3
+    await client.aclose()
+
+
 async def test_exhausted_retries_raise_transient() -> None:
     calls = 0
 
