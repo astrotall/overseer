@@ -145,6 +145,7 @@ async def test_history_sent_to_llm_is_truncated_to_limit(db_session: AsyncSessio
         conversation_id, "новое"
     )
 
+    assert llm_client.calls[0][1].role == "user"
     assert llm_client.calls[0] == [
         get_system_prompt_message(),
         ChatMessage(role="user", content="старое-4"),
@@ -154,6 +155,30 @@ async def test_history_sent_to_llm_is_truncated_to_limit(db_session: AsyncSessio
 
     history = await repository.get_history(conversation_id)
     assert len(history) == 8
+
+
+@pytest.mark.integration
+async def test_history_sent_to_llm_with_default_limit_starts_with_user_message(
+    db_session: AsyncSession,
+) -> None:
+    conversation_id = await _new_conversation(db_session)
+    repository = ConversationRepository(db_session)
+    for index in range(15):
+        await repository.append_message(
+            conversation_id, ChatMessage(role="user", content=f"вопрос-{index}")
+        )
+        await repository.append_message(
+            conversation_id, ChatMessage(role="assistant", content=f"ответ-{index}")
+        )
+    llm_client = FakeLLMClient()
+
+    await ChatService(db_session, llm_client).send_message(conversation_id, "новое")
+
+    sent_messages = llm_client.calls[0]
+    assert sent_messages[0] == get_system_prompt_message()
+    assert len(sent_messages) == 1 + DEFAULT_HISTORY_LIMIT
+    assert sent_messages[1].role == "user"
+    assert sent_messages[-1] == ChatMessage(role="user", content="новое")
 
 
 @pytest.mark.integration
@@ -195,6 +220,14 @@ async def test_non_positive_history_limit_is_rejected(db_session: AsyncSession) 
         ChatService(db_session, FakeLLMClient(), history_limit=0)
 
     assert DEFAULT_HISTORY_LIMIT > 0
+
+
+@pytest.mark.integration
+async def test_even_history_limit_is_rejected(db_session: AsyncSession) -> None:
+    with pytest.raises(ValueError, match="history_limit"):
+        ChatService(db_session, FakeLLMClient(), history_limit=4)
+
+    assert DEFAULT_HISTORY_LIMIT % 2 == 1
 
 
 @pytest.mark.integration

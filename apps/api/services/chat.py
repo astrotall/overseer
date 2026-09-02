@@ -11,7 +11,7 @@ from libs.llm.system_prompt import get_system_prompt_message
 
 logger = get_logger(__name__)
 
-DEFAULT_HISTORY_LIMIT = 30
+DEFAULT_HISTORY_LIMIT = 29
 
 
 class ChatService:
@@ -24,6 +24,13 @@ class ChatService:
     ) -> None:
         if history_limit <= 0:
             raise ValueError(f"history_limit must be positive, got {history_limit}")
+        if history_limit % 2 == 0:
+            raise ValueError(
+                "history_limit must be odd, got "
+                f"{history_limit}: history is a strict user/assistant sequence ending on "
+                "the fresh user message, so a slice taken from the end must start on "
+                "'user' too — that only holds for an odd-sized slice"
+            )
 
         self._session = session
         self._repository = ConversationRepository(session)
