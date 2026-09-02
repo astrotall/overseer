@@ -8,7 +8,7 @@ import pytest
 from libs.core.config import Settings
 from libs.core.exceptions import LLMBadRequestError, LLMResponseError, LLMTransientError
 from libs.llm.anthropic_client import AnthropicClient
-from libs.llm.base import ChatMessage, ToolCall
+from libs.llm.base import ChatMessage, ToolCall, ToolSpec
 
 
 def _settings() -> Settings:
@@ -199,4 +199,31 @@ async def test_tool_use_stop_reason_is_response_error() -> None:
     client = _client(httpx2.MockTransport(handler))
     with pytest.raises(LLMResponseError, match="OVE-4"):
         await client.complete([ChatMessage(role="user", content="привет")])
+    await client.aclose()
+
+
+async def test_complete_with_tools_raises_not_implemented() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise AssertionError("запрос не должен уйти в API, если переданы tools")
+
+    client = _client(httpx2.MockTransport(handler))
+    tools = [ToolSpec(name="write_document", description="пишет документ")]
+    with pytest.raises(LLMResponseError, match="OVE-4"):
+        await client.complete([ChatMessage(role="user", content="привет")], tools=tools)
+    await client.aclose()
+
+
+@pytest.mark.parametrize("status_code", [408, 409])
+async def test_exhausted_retries_on_408_409_raise_transient(status_code: int) -> None:
+    calls = 0
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        return httpx2.Response(status_code, headers={"retry-after": "0.01"}, text="boom")
+
+    client = _client(httpx2.MockTransport(handler), max_retries=2)
+    with pytest.raises(LLMTransientError):
+        await client.complete([ChatMessage(role="user", content="привет")])
+    assert calls == 3
     await client.aclose()

@@ -31,7 +31,7 @@ from libs.llm.base import (
     Usage,
 )
 
-_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504, 529})
+_RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
 
 _STOP_REASON: dict[str, StopReason] = {
     "end_turn": "end_turn",
@@ -57,7 +57,7 @@ class AnthropicClient(LLMClient):
         settings = settings or get_settings()
         if not settings.anthropic_api_key:
             raise ConfigurationError("Не задан ANTHROPIC_API_KEY")
-        self._model = settings.anthropic_model or self.default_model
+        self._model = settings.anthropic_model
         self._client = AsyncAnthropic(
             api_key=settings.anthropic_api_key,
             max_retries=max_retries,
@@ -77,6 +77,10 @@ class AnthropicClient(LLMClient):
         max_tokens: int = 4096,
         temperature: float | None = None,
     ) -> LLMResponse:
+        if tools:
+            raise LLMResponseError(
+                "Anthropic-клиент пока не поддерживает передачу tools в запрос (OVE-4)"
+            )
         system, encoded_messages = _encode_messages(messages)
         kwargs: dict[str, Any] = {}
         if system is not None:
