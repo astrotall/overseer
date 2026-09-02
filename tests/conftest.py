@@ -92,6 +92,7 @@ def _assert_tool_calls_conform_to_contract(tool_calls: Sequence[ToolCall]) -> No
         assert isinstance(call.name, str)
         assert call.name
         assert isinstance(call.arguments, dict)
+        assert all(isinstance(key, str) for key in call.arguments)
 
 
 @pytest.fixture

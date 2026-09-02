@@ -218,6 +218,7 @@ def test_assert_tool_calls_conform_to_contract_accepts_valid_calls(
         ToolCall.model_construct(id="", name="search", arguments={}),
         ToolCall.model_construct(id="c1", name="", arguments={}),
         ToolCall.model_construct(id="c1", name="search", arguments="not-a-dict"),  # type: ignore[arg-type]
+        ToolCall.model_construct(id="c1", name="search", arguments={123: "value"}),  # type: ignore[dict-item]
     ],
 )
 def test_assert_tool_calls_conform_to_contract_rejects_broken_calls(
