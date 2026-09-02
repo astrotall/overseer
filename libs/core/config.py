@@ -11,6 +11,8 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 Env = Literal["local", "dev", "prod"]
 
+LLMProvider = Literal["anthropic", "deepseek"]
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -33,6 +35,12 @@ class Settings(BaseSettings):
             "БД для тестов. Если не задана, тесты берут database_url и подставляют "
             "имя базы с суффиксом _test — рабочая база никогда не используется."
         ),
+    )
+
+    llm_provider: LLMProvider = Field(
+        default="deepseek",
+        description="Активный LLM-провайдер: один на запущенный инстанс, без per-request "
+        "переключения",
     )
 
     anthropic_api_key: str | None = None
