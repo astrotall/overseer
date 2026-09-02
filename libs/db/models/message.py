@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Identity,
+    Index,
     String,
     Text,
     false,
@@ -61,6 +62,7 @@ class Message(Base):
             "role IN ('system', 'user', 'assistant', 'tool')",
             name="role_is_valid",
         ),
+        Index("ix_messages_conversation_id_sequence", "conversation_id", "sequence"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
