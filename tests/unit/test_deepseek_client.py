@@ -146,6 +146,31 @@ async def test_retries_transient_then_succeeds() -> None:
     await client.aclose()
 
 
+async def test_retries_on_429_then_succeeds() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return httpx.Response(429, text="rate limited")
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-chat",
+                "choices": [
+                    {"finish_reason": "stop", "message": {"role": "assistant", "content": "ок"}}
+                ],
+            },
+        )
+
+    client = _client(httpx.MockTransport(handler))
+    result = await client.complete([ChatMessage(role="user", content="привет")])
+    assert result.text == "ок"
+    assert calls == 3
+    await client.aclose()
+
+
 async def test_exhausted_retries_raise_transient() -> None:
     calls = 0
 
