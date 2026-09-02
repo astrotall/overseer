@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from apps.api.exception_handlers import register_exception_handlers
 from apps.api.routes import api_router
 from libs.core.config import get_settings, validate_llm_provider_key
 from libs.core.logging import configure_logging, get_logger
@@ -47,6 +48,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(api_router)
+    register_exception_handlers(app)
     return app
 
 

@@ -43,6 +43,10 @@ class ConversationRepository:
         await self._session.flush()
         return conversation.id
 
+    async def conversation_exists(self, conversation_id: uuid.UUID) -> bool:
+        conversation = await self._session.get(Conversation, conversation_id)
+        return conversation is not None
+
     async def append_message(self, conversation_id: uuid.UUID, message: ChatMessage) -> None:
         db_message = _to_message(conversation_id, message)
         self._session.add(db_message)
