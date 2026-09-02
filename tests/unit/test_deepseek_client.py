@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Sequence
 
 import httpx
 import pytest
 
 from libs.core.config import Settings
 from libs.core.exceptions import LLMBadRequestError, LLMResponseError, LLMTransientError
-from libs.llm.base import ChatMessage, ToolSpec
+from libs.llm.base import ChatMessage, ToolCall, ToolSpec
 from libs.llm.deepseek_client import DeepSeekClient
 
 
@@ -58,7 +59,9 @@ async def test_complete_maps_text_response() -> None:
     await client.aclose()
 
 
-async def test_complete_maps_tool_calls() -> None:
+async def test_complete_maps_tool_calls(
+    assert_tool_calls_conform_to_contract: Callable[[Sequence[ToolCall]], None],
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         assert body["tools"][0]["function"]["name"] == "write_document"
@@ -96,6 +99,7 @@ async def test_complete_maps_tool_calls() -> None:
 
     assert result.stop_reason == "tool_use"
     assert result.has_tool_calls is True
+    assert_tool_calls_conform_to_contract(result.tool_calls)
     call = result.tool_calls[0]
     assert (call.id, call.name, call.arguments) == ("call_1", "write_document", {"path": "a.docx"})
     assert result.to_message().role == "assistant"
