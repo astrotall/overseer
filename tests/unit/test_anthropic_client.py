@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Sequence
 
 import httpx2
 import pytest
@@ -27,13 +28,14 @@ def _message_response(
     model: str = "claude-sonnet-4-5",
     input_tokens: int = 5,
     output_tokens: int = 2,
+    content: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     return {
         "id": "msg_1",
         "type": "message",
         "role": "assistant",
         "model": model,
-        "content": [{"type": "text", "text": text}],
+        "content": content if content is not None else [{"type": "text", "text": text}],
         "stop_reason": stop_reason,
         "stop_sequence": None,
         "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
@@ -191,25 +193,88 @@ async def test_missing_stop_reason_is_response_error() -> None:
     await client.aclose()
 
 
-async def test_tool_use_stop_reason_is_response_error() -> None:
+async def test_tool_use_stop_reason_without_tool_calls_is_response_error() -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         payload = _message_response(stop_reason="tool_use")
         return httpx2.Response(200, json=payload)
 
     client = _client(httpx2.MockTransport(handler))
-    with pytest.raises(LLMResponseError, match="OVE-4"):
+    with pytest.raises(LLMResponseError, match="tool_calls"):
         await client.complete([ChatMessage(role="user", content="привет")])
     await client.aclose()
 
 
-async def test_complete_with_tools_raises_not_implemented() -> None:
+async def test_complete_sends_tools_and_maps_tool_use_response(
+    assert_tool_calls_conform_to_contract: Callable[[Sequence[ToolCall]], None],
+) -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
-        raise AssertionError("запрос не должен уйти в API, если переданы tools")
+        body = json.loads(request.content)
+        assert body["tools"] == [
+            {
+                "name": "write_document",
+                "description": "пишет документ",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ]
+        return httpx2.Response(
+            200,
+            json=_message_response(
+                text="",
+                stop_reason="tool_use",
+                content=[
+                    {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "write_document",
+                        "input": {"path": "a.docx"},
+                    }
+                ],
+            ),
+        )
 
     client = _client(httpx2.MockTransport(handler))
     tools = [ToolSpec(name="write_document", description="пишет документ")]
-    with pytest.raises(LLMBadRequestError, match="OVE-4"):
-        await client.complete([ChatMessage(role="user", content="привет")], tools=tools)
+    result = await client.complete(
+        [ChatMessage(role="user", content="сделай документ")], tools=tools
+    )
+
+    assert result.stop_reason == "tool_use"
+    assert result.has_tool_calls is True
+    assert_tool_calls_conform_to_contract(result.tool_calls)
+    call = result.tool_calls[0]
+    assert (call.id, call.name, call.arguments) == ("call_1", "write_document", {"path": "a.docx"})
+    assert result.to_message().role == "assistant"
+    await client.aclose()
+
+
+async def test_complete_keeps_text_alongside_tool_use() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            json=_message_response(
+                text="",
+                stop_reason="tool_use",
+                content=[
+                    {"type": "text", "text": "сейчас сделаю"},
+                    {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "write_document",
+                        "input": {"path": "a.docx"},
+                    },
+                ],
+            ),
+        )
+
+    client = _client(httpx2.MockTransport(handler))
+    tools = [ToolSpec(name="write_document", description="пишет документ")]
+    result = await client.complete(
+        [ChatMessage(role="user", content="сделай документ")], tools=tools
+    )
+
+    assert result.text == "сейчас сделаю"
+    assert result.has_tool_calls is True
+    assert result.tool_calls[0].name == "write_document"
     await client.aclose()
 
 
