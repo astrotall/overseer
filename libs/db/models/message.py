@@ -57,6 +57,10 @@ class Message(Base):
             "role = 'tool' OR is_error = false",
             name="non_tool_role_forbids_is_error",
         ),
+        CheckConstraint(
+            "role IN ('system', 'user', 'assistant', 'tool')",
+            name="role_is_valid",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, text
@@ -16,19 +16,22 @@ async def test_messages_order_by_sequence_not_created_at(db_session: AsyncSessio
     db_session.add(conversation)
     await db_session.flush()
 
-    same_moment = datetime.now(UTC)
+    now = datetime.now(UTC)
+    later_created_at = now
+    earlier_created_at = now - timedelta(seconds=10)
+
     first = Message(
         conversation_id=conversation.id,
         role="assistant",
         content="calling a tool",
-        created_at=same_moment,
+        created_at=later_created_at,
     )
     second = Message(
         conversation_id=conversation.id,
         role="tool",
         content="result",
         tool_call_id="call-1",
-        created_at=same_moment,
+        created_at=earlier_created_at,
     )
     db_session.add(first)
     await db_session.flush()
@@ -40,8 +43,9 @@ async def test_messages_order_by_sequence_not_created_at(db_session: AsyncSessio
     )
     loaded = result.scalar_one()
 
-    assert [message.id for message in loaded.messages] == [first.id, second.id]
     assert first.sequence < second.sequence
+    assert first.created_at > second.created_at
+    assert [message.id for message in loaded.messages] == [first.id, second.id]
 
 
 @pytest.mark.integration
@@ -119,6 +123,38 @@ async def test_tool_role_with_tool_call_id_is_valid(db_session: AsyncSession) ->
 
     assert message.sequence is not None
     assert message.is_error is True
+
+
+@pytest.mark.integration
+async def test_system_role_is_valid(db_session: AsyncSession) -> None:
+    conversation = Conversation()
+    db_session.add(conversation)
+    await db_session.flush()
+
+    message = Message(conversation_id=conversation.id, role="system", content="be concise")
+    db_session.add(message)
+    await db_session.flush()
+
+    assert message.sequence is not None
+
+
+@pytest.mark.integration
+async def test_invalid_role_is_rejected(db_session: AsyncSession) -> None:
+    conversation = Conversation()
+    db_session.add(conversation)
+    await db_session.flush()
+
+    db_session.add(
+        Message(
+            conversation_id=conversation.id,
+            role="not_a_role",  # type: ignore[arg-type]
+            content="hi",
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+    await db_session.rollback()
 
 
 @pytest.mark.integration
