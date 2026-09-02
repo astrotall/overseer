@@ -17,7 +17,7 @@
 
 </div>
 
-[![CI](https://github.com/astrotall/overseer/actions/workflows/ci.yml/badge.svg)](https://github.com/<owner>/overseer/actions/workflows/ci.yml)
+[![CI](https://github.com/astrotall/overseer/actions/workflows/ci.yml/badge.svg)](https://github.com/astrotall/overseer/actions/workflows/ci.yml)
 
 **Overseer** is a system-level AI agent that operates the user's computer from a
 voice or text command.
