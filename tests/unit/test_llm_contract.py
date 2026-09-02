@@ -55,6 +55,7 @@ INVALID_MESSAGES: list[tuple[str, dict[str, Any]]] = [
         {"role": "assistant", "content": "не вышло", "is_error": True},
     ),
     ("extra_field_forbidden", {"role": "user", "content": "привет", "name": "write_document"}),
+    ("tool_calls_none_not_allowed", {"role": "assistant", "content": "готово", "tool_calls": None}),
 ]
 
 VALID_RESPONSES: list[tuple[str, dict[str, Any]]] = [
