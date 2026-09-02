@@ -11,7 +11,7 @@ from anthropic import (
     APIStatusError,
     AsyncAnthropic,
 )
-from anthropic.types import Message, MessageParam
+from anthropic.types import Message, MessageParam, ToolParam
 from pydantic import ValidationError
 
 from libs.core.config import Settings, get_settings
@@ -27,6 +27,7 @@ from libs.llm.base import (
     LLMClient,
     LLMResponse,
     StopReason,
+    ToolCall,
     ToolSpec,
     Usage,
 )
@@ -77,14 +78,12 @@ class AnthropicClient(LLMClient):
         max_tokens: int = 4096,
         temperature: float | None = None,
     ) -> LLMResponse:
-        if tools:
-            raise LLMBadRequestError(
-                "Anthropic-клиент пока не поддерживает передачу tools в запрос (OVE-4)"
-            )
         system, encoded_messages = _encode_messages(messages)
         kwargs: dict[str, Any] = {}
         if system is not None:
             kwargs["system"] = system
+        if tools:
+            kwargs["tools"] = cast(list[ToolParam], [_encode_tool(tool) for tool in tools])
         if temperature is not None:
             kwargs["temperature"] = temperature
 
@@ -142,6 +141,14 @@ def _encode_messages(messages: Sequence[ChatMessage]) -> tuple[str | None, list[
     return system, encoded
 
 
+def _encode_tool(tool: ToolSpec) -> dict[str, Any]:
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "input_schema": tool.input_schema,
+    }
+
+
 def _encode_turn(message: ChatMessage) -> dict[str, Any]:
     if message.role == "assistant" and message.tool_calls:
         blocks: list[dict[str, Any]] = []
@@ -165,6 +172,11 @@ def _decode_response(message: Message) -> LLMResponse:
         raise LLMResponseError("В ответе Anthropic нет usage")
 
     text = "".join(block.text for block in message.content if block.type == "text")
+    tool_calls = [
+        ToolCall(id=block.id, name=block.name, arguments=block.input)
+        for block in message.content
+        if block.type == "tool_use"
+    ]
     stop_reason = _decode_stop_reason(message.stop_reason)
 
     try:
@@ -172,6 +184,7 @@ def _decode_response(message: Message) -> LLMResponse:
             model=model,
             stop_reason=stop_reason,
             text=text,
+            tool_calls=tool_calls,
             usage=Usage(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens),
             raw=message.model_dump(mode="json"),
         )
@@ -187,11 +200,6 @@ def _decode_stop_reason(native: str | None) -> StopReason:
     mapped = _STOP_REASON.get(native)
     if mapped is None:
         raise LLMResponseError(f"Anthropic вернул неизвестный stop_reason: {native}")
-    if mapped == "tool_use":
-        raise LLMResponseError(
-            "Anthropic запросил вызов инструмента, но разбор новых tool_use "
-            "ещё не реализован (OVE-4)"
-        )
     return mapped
 
 
