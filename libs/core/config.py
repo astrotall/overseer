@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     )
 
     anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-sonnet-4-5"
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
