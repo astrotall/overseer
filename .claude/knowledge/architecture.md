@@ -160,13 +160,33 @@ override, а токены всё равно некуда стримить — We
 проекте. `Message.tool_calls` хранит те же `ToolCall` из `libs/llm/base.py`, а не
 параллельную jsonb-схему: (де)сериализацию делает `ToolCallListType` — `TypeDecorator` рядом
 с моделью, в `libs/db/models/message.py`, через `model_dump(mode="json")` / `model_validate`
-Pydantic-модели `ToolCall`.
+Pydantic-модели `ToolCall`. `impl` этого типа — `JSONB(none_as_null=True)`: без этого флага
+Python `None` лёг бы в колонку как JSON-литерал `null` внутри значения, а не как настоящий
+SQL `NULL`.
+
+`Message.tool_call_id` и `Message.is_error` зеркалят одноимённые поля `ChatMessage` — без
+них `role="tool"`-сообщение нельзя восстановить в валидный `ChatMessage` при чтении из базы.
+Форму `tool_call_id` (обязателен у `role="tool"`, `NULL` у остальных ролей) дублирует на
+уровне БД `CheckConstraint` `tool_role_requires_tool_call_id`, зеркальный
+`model_validator`'у `ChatMessage._check_role_shape`. `is_error` в контракте `ChatMessage` —
+не опциональное поле, а `bool` с дефолтом `False` для любой роли, но `_check_role_shape`
+всё же частично ограничивает его ролью: `is_error=True` допустим только у `role="tool"`,
+а `is_error=False` (в том числе дефолт) валиден при любой роли. В БД это зеркалит второй
+`CheckConstraint`, `non_tool_role_forbids_is_error` (`role = 'tool' OR is_error = false`),
+рядом с `tool_role_requires_tool_call_id`, а не вместо него; `NOT NULL DEFAULT false`
+остаётся.
+
+Порядок `Conversation.messages` держит не `created_at` (при близких по времени вставках —
+например, tool-call и его результат в одном ходе диспетчера — порядок по времени не
+гарантирован), а `Message.sequence`: `BigInteger` с `Identity()`, монотонно растущий на
+уровне самой Postgres. `created_at` остаётся для отображения и аудита, но не как
+сортировочный ключ — порядок сообщений напрямую определяет, что уйдёт в LLM как история.
 
 ## Хранилища
 
 **PostgreSQL 16** (SQLAlchemy 2.x async + asyncpg) — история диалогов, память агента, логи
-вызовов инструментов (аудит: что вызвали, с какими аргументами, что вернулось). ORM-модели
-пока не написаны, `libs/db/models/` — заготовка.
+вызовов инструментов (аудит: что вызвали, с какими аргументами, что вернулось). Первые
+ORM-модели — `Conversation` и `Message`, см. раздел «ORM-модели `libs/db/models`» выше.
 
 **Redis 7** — очередь Arq, pub/sub событий (в том числе канал до `executor`), кэш контекста,
 rate limiting.

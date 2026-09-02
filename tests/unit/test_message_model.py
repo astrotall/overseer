@@ -57,3 +57,18 @@ def test_bind_and_result_processor_round_trip_through_jsonb_pipeline() -> None:
     serialized = bind(tool_calls)
     assert isinstance(serialized, str)
     assert result(serialized) == tool_calls
+
+
+def test_bind_processor_encodes_none_as_sql_null_not_json_null() -> None:
+    """none_as_null=True делает bind-параметр Python None (SQL NULL), а не строку 'null'.
+
+    Без него JSONB сериализовал бы None в JSON-литерал 'null' внутри значения колонки —
+    round-trip через process_result_value этого не ловит, потому что JSON null тоже
+    десериализуется обратно в Python None.
+    """
+    type_ = ToolCallListType()
+
+    bind = type_.bind_processor(DIALECT)
+    assert bind is not None
+
+    assert bind(None) is None

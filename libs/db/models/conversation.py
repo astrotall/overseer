@@ -30,6 +30,6 @@ class Conversation(Base):
 
     messages: Mapped[list[Message]] = relationship(
         back_populates="conversation",
-        order_by="Message.created_at",
+        order_by="Message.sequence",
         lazy="selectin",
     )
