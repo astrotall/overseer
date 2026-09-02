@@ -117,7 +117,7 @@ async def test_message_turn_returns_reply_envelope(
     _override_llm_client(app, FakeLLMClient())
 
     frames = await asyncio.to_thread(
-        _exchange, client, f"/ws?conversation_id={conversation_id}", [_message("привет")]
+        _exchange, client, f"/ws/chat?conversation_id={conversation_id}", [_message("привет")]
     )
 
     assert frames == [{"type": "reply", "payload": {"role": "assistant", "content": "готово"}}]
@@ -140,7 +140,7 @@ async def test_malformed_message_keeps_the_connection_usable(
     frames = await asyncio.to_thread(
         _exchange,
         client,
-        f"/ws?conversation_id={conversation_id}",
+        f"/ws/chat?conversation_id={conversation_id}",
         [broken, _message("привет")],
     )
 
@@ -159,7 +159,7 @@ async def test_llm_failure_is_reported_without_closing_the_connection(
     frames = await asyncio.to_thread(
         _exchange,
         client,
-        f"/ws?conversation_id={conversation_id}",
+        f"/ws/chat?conversation_id={conversation_id}",
         [_message("упадёт"), _message("получится")],
     )
 
@@ -189,7 +189,7 @@ async def test_consecutive_messages_share_one_conversation_history(
     frames = await asyncio.to_thread(
         _exchange,
         client,
-        f"/ws?conversation_id={conversation_id}",
+        f"/ws/chat?conversation_id={conversation_id}",
         [_message("первый"), _message("второй")],
     )
 
@@ -213,7 +213,7 @@ async def test_unknown_conversation_id_is_rejected_on_connect(
     _override_llm_client(app, FakeLLMClient())
 
     def _connect() -> tuple[dict[str, Any], bool]:
-        with client.websocket_connect(f"/ws?conversation_id={uuid.uuid4()}") as websocket:
+        with client.websocket_connect(f"/ws/chat?conversation_id={uuid.uuid4()}") as websocket:
             frame = websocket.receive_json()
             try:
                 websocket.receive_json()
@@ -239,7 +239,7 @@ async def test_malformed_conversation_id_is_rejected_before_handshake(
     def _connect() -> int:
         with (
             pytest.raises(WebSocketDisconnect) as exc_info,
-            client.websocket_connect("/ws?conversation_id=not-a-uuid"),
+            client.websocket_connect("/ws/chat?conversation_id=not-a-uuid"),
         ):
             pass
         return exc_info.value.code
@@ -257,7 +257,7 @@ async def test_connection_without_conversation_id_uses_the_default_conversation(
     default_id: uuid.UUID | None = None
 
     try:
-        frames = await asyncio.to_thread(_exchange, client, "/ws", [_message("привет")])
+        frames = await asyncio.to_thread(_exchange, client, "/ws/chat", [_message("привет")])
         assert frames == [{"type": "reply", "payload": {"role": "assistant", "content": "готово"}}]
 
         async with AsyncSession(db_engine, expire_on_commit=False) as session:

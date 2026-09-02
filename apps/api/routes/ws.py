@@ -109,7 +109,7 @@ async def _handle_turn(
     await _send_reply(websocket, MessageResponse(role=answer.role, content=answer.content))
 
 
-@router.websocket("/ws")
+@router.websocket("/ws/chat")
 async def agent_ws(
     websocket: WebSocket,
     session: SessionDep,

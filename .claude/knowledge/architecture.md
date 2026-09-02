@@ -24,7 +24,7 @@ HTTP + WebSocket: роуты, DI-зависимости, валидация DTO.
 - `routes/health.py` — `GET /health`, отдаёт `{"status": "ok"}`;
 - `routes/conversations.py` — REST-вход в чат: `POST /conversations` и
   `POST /conversations/{id}/messages` (OVE-17);
-- `routes/ws.py` — `/ws`, канал общения с агентом (OVE-18, см. ниже).
+- `routes/ws.py` — `/ws/chat`, канал общения с агентом (OVE-18, см. ниже).
 
 Запуск: `uv run uvicorn apps.api.main:app --reload`.
 
@@ -59,9 +59,9 @@ HTTP + WebSocket: роуты, DI-зависимости, валидация DTO.
   сохраняет и отдаёт только текст. В историю `tool_use` без парного `tool_result` не
   попадает намеренно: Anthropic на следующем ходе такую историю не примет.
 
-#### WebSocket-протокол `/ws` (OVE-18)
+#### WebSocket-протокол `/ws/chat` (OVE-18)
 
-`/ws` ходит в ту же `ChatService`, что и REST: транспорт разный, поток хода один. Решения:
+`/ws/chat` ходит в ту же `ChatService`, что и REST: транспорт разный, поток хода один. Решения:
 
 - **Один `ChatService` (одна `AsyncSession`) на всё соединение**, а не на сообщение.
   Зависимости объявлены обычными `SessionDep` / `ConversationRepositoryDep` /
@@ -75,8 +75,9 @@ HTTP + WebSocket: роуты, DI-зависимости, валидация DTO.
   Неизвестный `conversation_id` — единственный случай, когда сокет закрывается: клиенту
   уходит `error`-конверт и `close(1008)`, потому что дальше говорить не с чем.
 - **Конверт вместо голых строк.** Клиент → сервер: `{"type": "message", "payload":
-  {"content": str}}`; сервер → клиент: `{"type": "reply", "payload": {"role", "content"}}`
-  или `{"type": "error", "payload": {"error", "detail", "code"}}`. Схемы — в
+  {"content": "..."}}`; сервер → клиент: `{"type": "reply", "payload": {"role": "assistant",
+  "content": "Отчёт за август сформирован и сохранён в Word."}}` или `{"type": "error",
+  "payload": {"error", "detail", "code"}}`. Схемы — в
   `libs/schemas/ws.py`, и `payload` в них — те же самые `SendMessageRequest` /
   `MessageResponse`, что у REST: одинаковый ввод даёт одинаковый ответ в обоих транспортах,
   а ограничения (`MAX_MESSAGE_LENGTH`, непустой `content`) не разъезжаются. Поле `type`
@@ -283,5 +284,5 @@ uv run alembic downgrade -1
 
 Так же не зафиксированы: типы WebSocket-конвертов сверх `message` / `reply` / `error`
 (стриминг токенов, статусы вызова инструментов, запрос подтверждения — эпик 5; сам конверт
-и его базовые типы зафиксированы, см. «WebSocket-протокол `/ws`» выше), протокол между
+и его базовые типы зафиксированы, см. «WebSocket-протокол `/ws/chat`» выше), протокол между
 `worker` и `executor`, схема хранения памяти агента.
