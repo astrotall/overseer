@@ -16,24 +16,25 @@ from libs.llm.base import ChatMessage, ToolCall
 async def test_create_conversation(db_session: AsyncSession) -> None:
     repository = ConversationRepository(db_session)
 
-    conversation = await repository.create_conversation()
+    conversation_id = await repository.create_conversation()
 
-    assert conversation.id is not None
-    assert conversation.title is None
+    assert isinstance(conversation_id, uuid.UUID)
+    assert not isinstance(conversation_id, Conversation)
 
 
 @pytest.mark.integration
 async def test_append_and_get_history_round_trips_text_messages(db_session: AsyncSession) -> None:
     repository = ConversationRepository(db_session)
-    conversation = await repository.create_conversation()
+    conversation_id = await repository.create_conversation()
 
-    await repository.append_message(
-        conversation.id, ChatMessage(role="system", content="be concise")
+    result = await repository.append_message(
+        conversation_id, ChatMessage(role="system", content="be concise")
     )
-    await repository.append_message(conversation.id, ChatMessage(role="user", content="hi"))
-    await repository.append_message(conversation.id, ChatMessage(role="assistant", content="hello"))
+    assert result is None
+    await repository.append_message(conversation_id, ChatMessage(role="user", content="hi"))
+    await repository.append_message(conversation_id, ChatMessage(role="assistant", content="hello"))
 
-    history = await repository.get_history(conversation.id)
+    history = await repository.get_history(conversation_id)
 
     assert history == [
         ChatMessage(role="system", content="be concise"),
@@ -47,13 +48,13 @@ async def test_append_and_get_history_round_trips_assistant_tool_calls(
     db_session: AsyncSession,
 ) -> None:
     repository = ConversationRepository(db_session)
-    conversation = await repository.create_conversation()
+    conversation_id = await repository.create_conversation()
 
     tool_call = ToolCall(id="call-1", name="search", arguments={"query": "overseer"})
     assistant_message = ChatMessage(role="assistant", content=None, tool_calls=[tool_call])
-    await repository.append_message(conversation.id, assistant_message)
+    await repository.append_message(conversation_id, assistant_message)
 
-    history = await repository.get_history(conversation.id)
+    history = await repository.get_history(conversation_id)
 
     assert history == [assistant_message]
 
@@ -63,12 +64,12 @@ async def test_append_and_get_history_round_trips_tool_result_messages(
     db_session: AsyncSession,
 ) -> None:
     repository = ConversationRepository(db_session)
-    conversation = await repository.create_conversation()
+    conversation_id = await repository.create_conversation()
 
     tool_message = ChatMessage(role="tool", content="boom", tool_call_id="call-1", is_error=True)
-    await repository.append_message(conversation.id, tool_message)
+    await repository.append_message(conversation_id, tool_message)
 
-    history = await repository.get_history(conversation.id)
+    history = await repository.get_history(conversation_id)
 
     assert history == [tool_message]
     assert history[0].tool_call_id == "call-1"
@@ -78,14 +79,14 @@ async def test_append_and_get_history_round_trips_tool_result_messages(
 @pytest.mark.integration
 async def test_get_history_orders_by_sequence(db_session: AsyncSession) -> None:
     repository = ConversationRepository(db_session)
-    conversation = await repository.create_conversation()
+    conversation_id = await repository.create_conversation()
 
     for index in range(5):
         await repository.append_message(
-            conversation.id, ChatMessage(role="user", content=str(index))
+            conversation_id, ChatMessage(role="user", content=str(index))
         )
 
-    history = await repository.get_history(conversation.id)
+    history = await repository.get_history(conversation_id)
 
     assert [message.content for message in history] == ["0", "1", "2", "3", "4"]
 
@@ -95,16 +96,37 @@ async def test_get_history_limit_returns_most_recent_messages_in_order(
     db_session: AsyncSession,
 ) -> None:
     repository = ConversationRepository(db_session)
-    conversation = await repository.create_conversation()
+    conversation_id = await repository.create_conversation()
 
     for index in range(5):
         await repository.append_message(
-            conversation.id, ChatMessage(role="user", content=str(index))
+            conversation_id, ChatMessage(role="user", content=str(index))
         )
 
-    history = await repository.get_history(conversation.id, limit=2)
+    history = await repository.get_history(conversation_id, limit=2)
 
     assert [message.content for message in history] == ["3", "4"]
+
+
+@pytest.mark.integration
+async def test_get_history_limit_zero_returns_empty_list(db_session: AsyncSession) -> None:
+    repository = ConversationRepository(db_session)
+    conversation_id = await repository.create_conversation()
+
+    await repository.append_message(conversation_id, ChatMessage(role="user", content="hi"))
+
+    history = await repository.get_history(conversation_id, limit=0)
+
+    assert history == []
+
+
+@pytest.mark.integration
+async def test_get_history_negative_limit_raises_value_error(db_session: AsyncSession) -> None:
+    repository = ConversationRepository(db_session)
+    conversation_id = await repository.create_conversation()
+
+    with pytest.raises(ValueError, match="limit"):
+        await repository.get_history(conversation_id, limit=-1)
 
 
 @pytest.mark.integration
@@ -116,7 +138,8 @@ async def test_get_or_create_default_conversation_is_idempotent(
     first = await repository.get_or_create_default_conversation()
     second = await repository.get_or_create_default_conversation()
 
-    assert first.id == second.id
+    assert isinstance(first, uuid.UUID)
+    assert first == second
 
 
 @pytest.mark.integration
@@ -126,9 +149,9 @@ async def test_get_or_create_default_conversation_is_safe_under_concurrent_first
     async def _get_or_create_via_own_connection() -> uuid.UUID:
         async with AsyncSession(db_engine, expire_on_commit=False) as session:
             repository = ConversationRepository(session)
-            conversation = await repository.get_or_create_default_conversation()
+            conversation_id = await repository.get_or_create_default_conversation()
             await session.commit()
-            return conversation.id
+            return conversation_id
 
     conversation_ids: set[uuid.UUID] = set()
     try:
@@ -155,12 +178,12 @@ async def test_append_and_get_history_round_trips_empty_tool_calls_as_empty_list
     db_session: AsyncSession,
 ) -> None:
     repository = ConversationRepository(db_session)
-    conversation = await repository.create_conversation()
+    conversation_id = await repository.create_conversation()
 
     message = ChatMessage(role="assistant", content="hello")
     assert message.tool_calls == []
 
-    await repository.append_message(conversation.id, message)
-    history = await repository.get_history(conversation.id)
+    await repository.append_message(conversation_id, message)
+    history = await repository.get_history(conversation_id)
 
     assert history[0].tool_calls == []

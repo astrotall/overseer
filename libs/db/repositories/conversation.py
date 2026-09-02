@@ -37,21 +37,23 @@ class ConversationRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def create_conversation(self, *, title: str | None = None) -> Conversation:
+    async def create_conversation(self, *, title: str | None = None) -> uuid.UUID:
         conversation = Conversation(title=title)
         self._session.add(conversation)
         await self._session.flush()
-        return conversation
+        return conversation.id
 
-    async def append_message(self, conversation_id: uuid.UUID, message: ChatMessage) -> Message:
+    async def append_message(self, conversation_id: uuid.UUID, message: ChatMessage) -> None:
         db_message = _to_message(conversation_id, message)
         self._session.add(db_message)
         await self._session.flush()
-        return db_message
 
     async def get_history(
         self, conversation_id: uuid.UUID, limit: int | None = None
     ) -> list[ChatMessage]:
+        if limit is not None and limit < 0:
+            raise ValueError(f"limit must be non-negative, got {limit}")
+
         stmt = (
             select(Message)
             .where(Message.conversation_id == conversation_id)
@@ -64,22 +66,22 @@ class ConversationRepository:
         messages = result.scalars().all()
         return [_to_chat_message(message) for message in reversed(messages)]
 
-    async def get_or_create_default_conversation(self) -> Conversation:
+    async def get_or_create_default_conversation(self) -> uuid.UUID:
         conversation = await self._session.get(Conversation, _DEFAULT_CONVERSATION_ID)
         if conversation is not None:
-            return conversation
+            return conversation.id
 
         stmt = (
             pg_insert(Conversation)
             .values(id=_DEFAULT_CONVERSATION_ID)
             .on_conflict_do_nothing(index_elements=[Conversation.id])
-            .returning(Conversation)
+            .returning(Conversation.id)
         )
         result = await self._session.execute(stmt)
-        conversation = result.scalar_one_or_none()
-        if conversation is not None:
-            return conversation
+        conversation_id = result.scalar_one_or_none()
+        if conversation_id is not None:
+            return conversation_id
 
         conversation = await self._session.get(Conversation, _DEFAULT_CONVERSATION_ID)
         assert conversation is not None
-        return conversation
+        return conversation.id
