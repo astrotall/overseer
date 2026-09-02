@@ -154,6 +154,14 @@ override, а токены всё равно некуда стримить — We
 `libs/tools` пуст. Инструменты, требующие Windows/COM/Playwright, будут исполняться в
 `apps/executor` — сюда попадёт только их описание и прокси-вызов.
 
+### ORM-модели `libs/db/models`
+
+`Conversation` (`conversations`) и `Message` (`messages`, OVE-11) — первые ORM-модели в
+проекте. `Message.tool_calls` хранит те же `ToolCall` из `libs/llm/base.py`, а не
+параллельную jsonb-схему: (де)сериализацию делает `ToolCallListType` — `TypeDecorator` рядом
+с моделью, в `libs/db/models/message.py`, через `model_dump(mode="json")` / `model_validate`
+Pydantic-модели `ToolCall`.
+
 ## Хранилища
 
 **PostgreSQL 16** (SQLAlchemy 2.x async + asyncpg) — история диалогов, память агента, логи
