@@ -144,6 +144,13 @@ override, а токены всё равно некуда стримить — We
 Реализации клиентов (`AnthropicClient`, `DeepSeekClient`) пока заготовки: конструкторы
 проверяют ключ, `complete()` кидает `NotImplementedError` — это следующие задачи.
 
+`libs/llm/factory.py` — `get_llm_client(settings=None)` выбирает клиента по
+`settings.llm_provider` и кэширует по одному инстансу на провайдера на процесс (OVE-8:
+«one active provider per running instance is enough»), а не создаёт новый при каждом
+вызове — иначе `DeepSeekClient` плодил бы новые `httpx.AsyncClient` с утечкой соединений.
+Фабрика клиента не закрывает: тот, кто подключит `get_llm_client()` к lifespan `apps/api`
+(OVE-16), отвечает за вызов `aclose()` на выключении.
+
 `libs/tools` пуст. Инструменты, требующие Windows/COM/Playwright, будут исполняться в
 `apps/executor` — сюда попадёт только их описание и прокси-вызов.
 

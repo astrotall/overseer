@@ -8,6 +8,7 @@ from libs.llm.base import (
     ToolSpec,
     Usage,
 )
+from libs.llm.factory import get_llm_client
 
 __all__ = [
     "ChatMessage",
@@ -18,4 +19,5 @@ __all__ = [
     "ToolCall",
     "ToolSpec",
     "Usage",
+    "get_llm_client",
 ]
