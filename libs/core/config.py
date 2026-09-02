@@ -7,6 +7,8 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from libs.core.exceptions import ConfigurationError
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 Env = Literal["local", "dev", "prod"]
@@ -60,3 +62,19 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+_LLM_PROVIDER_ENV_VAR: dict[LLMProvider, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+}
+
+
+def validate_llm_provider_key(settings: Settings) -> None:
+    provider = settings.llm_provider
+    key = settings.anthropic_api_key if provider == "anthropic" else settings.deepseek_api_key
+    if key:
+        return
+
+    env_var = _LLM_PROVIDER_ENV_VAR[provider]
+    raise ConfigurationError(f"{env_var} не задан — обязателен, так как LLM_PROVIDER={provider}")

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from apps.api.routes import api_router
-from libs.core.config import get_settings
+from libs.core.config import get_settings, validate_llm_provider_key
 from libs.core.logging import configure_logging, get_logger
 from libs.db.redis import close_redis, init_redis
 from libs.db.session import close_engine, init_engine
@@ -17,6 +17,7 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
+    validate_llm_provider_key(settings)
     configure_logging(settings)
 
     init_engine(settings)
