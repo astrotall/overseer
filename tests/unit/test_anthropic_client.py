@@ -208,7 +208,7 @@ async def test_complete_with_tools_raises_not_implemented() -> None:
 
     client = _client(httpx2.MockTransport(handler))
     tools = [ToolSpec(name="write_document", description="пишет документ")]
-    with pytest.raises(LLMResponseError, match="OVE-4"):
+    with pytest.raises(LLMBadRequestError, match="OVE-4"):
         await client.complete([ChatMessage(role="user", content="привет")], tools=tools)
     await client.aclose()
 

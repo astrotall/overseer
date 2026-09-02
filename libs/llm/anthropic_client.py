@@ -78,7 +78,7 @@ class AnthropicClient(LLMClient):
         temperature: float | None = None,
     ) -> LLMResponse:
         if tools:
-            raise LLMResponseError(
+            raise LLMBadRequestError(
                 "Anthropic-клиент пока не поддерживает передачу tools в запрос (OVE-4)"
             )
         system, encoded_messages = _encode_messages(messages)
