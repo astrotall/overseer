@@ -10,6 +10,7 @@ from libs.core.config import get_settings, validate_llm_provider_key
 from libs.core.logging import configure_logging, get_logger
 from libs.db.redis import close_redis, init_redis
 from libs.db.session import close_engine, init_engine
+from libs.llm.factory import get_llm_client, reset_llm_client_cache
 
 logger = get_logger(__name__)
 
@@ -23,11 +24,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_engine(settings)
     redis = init_redis(settings)
     await redis.ping()
-    logger.info("api.startup", env=settings.env)
+    llm_client = get_llm_client(settings)
+    logger.info("api.startup", env=settings.env, llm_provider=settings.llm_provider)
 
     try:
         yield
     finally:
+        await llm_client.aclose()
+        reset_llm_client_cache()
         await close_redis()
         await close_engine()
         logger.info("api.shutdown")
