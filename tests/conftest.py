@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
 import pytest
 from fastapi import FastAPI
@@ -19,6 +19,7 @@ from sqlalchemy.pool import NullPool
 from apps.api.main import app as fastapi_app
 from libs.core.config import Settings, get_settings
 from libs.db import models
+from libs.llm import ToolCall
 
 
 @pytest.fixture(scope="session")
@@ -81,3 +82,18 @@ def app() -> Iterator[FastAPI]:
 async def async_client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
+
+
+def _assert_tool_calls_conform_to_contract(tool_calls: Sequence[ToolCall]) -> None:
+    for call in tool_calls:
+        assert isinstance(call, ToolCall)
+        assert isinstance(call.id, str)
+        assert call.id
+        assert isinstance(call.name, str)
+        assert call.name
+        assert isinstance(call.arguments, dict)
+
+
+@pytest.fixture
+def assert_tool_calls_conform_to_contract() -> Callable[[Sequence[ToolCall]], None]:
+    return _assert_tool_calls_conform_to_contract

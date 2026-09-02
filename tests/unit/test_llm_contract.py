@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import pytest
@@ -198,3 +199,30 @@ def test_llm_response_to_message_keeps_empty_text_without_tool_calls() -> None:
     assert response.has_tool_calls is False
     assert message.role == "assistant"
     assert message.content == ""
+
+
+def test_assert_tool_calls_conform_to_contract_accepts_valid_calls(
+    assert_tool_calls_conform_to_contract: Callable[[Sequence[ToolCall]], None],
+) -> None:
+    tool_calls = [
+        ToolCall(id="c1", name="write_document", arguments={"path": "report.docx"}),
+        ToolCall(id="c2", name="search", arguments={}),
+    ]
+
+    assert_tool_calls_conform_to_contract(tool_calls)
+
+
+@pytest.mark.parametrize(
+    "bad_call",
+    [
+        ToolCall.model_construct(id="", name="search", arguments={}),
+        ToolCall.model_construct(id="c1", name="", arguments={}),
+        ToolCall.model_construct(id="c1", name="search", arguments="not-a-dict"),  # type: ignore[arg-type]
+    ],
+)
+def test_assert_tool_calls_conform_to_contract_rejects_broken_calls(
+    bad_call: ToolCall,
+    assert_tool_calls_conform_to_contract: Callable[[Sequence[ToolCall]], None],
+) -> None:
+    with pytest.raises(AssertionError):
+        assert_tool_calls_conform_to_contract([bad_call])
