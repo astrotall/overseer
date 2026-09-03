@@ -15,7 +15,7 @@
 `voice` — это ещё один клиент существующего WebSocket-эндпоинта **`/ws/chat`** (OVE-18),
 с тем же конвертом, что и любой другой клиент:
 
-```
+```text
 клиент → сервер   {"type": "message", "payload": {"content": "..."}}
 сервер → клиент   {"type": "reply",   "payload": {"role": "assistant", "content": "..."}}
 сервер → клиент   {"type": "error",   "payload": {"error": "...", "detail": "...", "code": 503}}
@@ -26,7 +26,7 @@
 
 ## Поток данных
 
-```
+```text
 [микрофон] → capture.py → listener.py (wake word + эндпоинтинг) → stt.py
     → ws_client.py ⇄ /ws/chat → tts.py → playback.py → [динамик]
 ```
