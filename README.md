@@ -125,8 +125,10 @@ overseer/
 │   │   ├── deps.py          #   SessionDep / RedisDep / SettingsDep
 │   │   └── routes/          #   health.py, ws.py
 │   ├── worker/              # Arq worker: background and long-running tasks
-│   └── executor/            # STUB: a separate Windows service outside Docker
-│                            #   (COM/Playwright); see apps/executor/README.md
+│   ├── executor/            # STUB: a separate Windows service outside Docker
+│   │                        #   (COM/Playwright); see apps/executor/README.md
+│   └── voice/               # STUB: a local cross-platform voice client outside
+│                            #   Docker, a /ws/chat client; see apps/voice/README.md
 ├── libs/
 │   ├── core/                # config (pydantic-settings), logging (structlog), exceptions
 │   ├── db/                  # SQLAlchemy Base, async engine/session, Redis, models
@@ -313,6 +315,8 @@ job; we do not merge a red CI.
 - ⏳ LLM clients — interfaces only, generation is not implemented;
 - ⏳ the tool registry and tool calling — not implemented;
 - ⏳ `apps/executor` (COM/Playwright) — an empty package with a README;
+- ⏳ `apps/voice` (microphone, wake word, STT/TTS) — an empty package with a README;
+  the architecture is settled (OVE-44), the logic lands in OVE-45 — OVE-48;
 - ✅ test infrastructure: pytest + pytest-asyncio + pytest-cov, fixtures
   (`db_session`, `async_client`), the `GET /health` smoke test;
 - ✅ ruff, mypy, pre-commit and CI on GitHub Actions;

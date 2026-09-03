@@ -76,7 +76,7 @@ ci: run alembic upgrade head on PRs
 
 ### Области
 
-По приложению из `apps/`: `api`, `worker`, `executor`.
+По приложению из `apps/`: `api`, `worker`, `executor`, `voice`.
 По библиотеке из `libs/`: `db`, `llm`, `tools`, `schemas`, `core`.
 Общее: `deps`, `ci`, `docs`.
 
