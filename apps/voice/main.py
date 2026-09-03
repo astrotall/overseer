@@ -28,16 +28,20 @@ async def run(settings: VoiceSettings) -> None:
         on_wake_word=AsyncioWakeWordSink(asyncio.get_running_loop(), events),
         threshold=settings.wake_word_threshold,
     )
-    capture = AudioCapture(frames, device=resolve_device(settings.input_device))
-
-    listener.start()
-    capture.start()
-    logger.info(
-        "voice.listening",
-        phrase=settings.wake_word_phrase,
-        threshold=settings.wake_word_threshold,
+    capture = AudioCapture(
+        frames,
+        generation_provider=lambda: state.generation,
+        device=resolve_device(settings.input_device),
     )
+
     try:
+        listener.start()
+        capture.start()
+        logger.info(
+            "voice.listening",
+            phrase=settings.wake_word_phrase,
+            threshold=settings.wake_word_threshold,
+        )
         while True:
             event = await events.get()
             logger.info(

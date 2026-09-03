@@ -27,18 +27,24 @@
 ## Поток данных
 
 ```text
-[микрофон] → capture.py → listener.py (wake word + эндпоинтинг) → stt.py
+[микрофон] → capture.py → listener.py (wake word) → stt.py (накопление реплики, OVE-46)
     → ws_client.py ⇄ /ws/chat → tts.py → playback.py → [динамик]
 ```
 
+В OVE-45 конвейер кончается на `listener.py`: он доводит поток до «wake word принят» и
+отдаёт `WakeWordEvent`. Накопление кадров после срабатывания и эндпоинтинг (где кончается
+реплика) — OVE-46: конец реплики определяет тот же движок, что её распознаёт.
+
 ## Модель потоков
 
-- callback PortAudio (поток `sounddevice`) — только копирует кадр в ограниченную очередь;
-- один рабочий поток — wake word, VAD и нарезка на реплики;
+- callback PortAudio (поток `sounddevice`) — только копирует кадр в ограниченную очередь,
+  пометив его текущим `generation` состояния;
+- один рабочий поток (строго один: `start()` на ещё живом потоке падает с `RuntimeError`) —
+  wake word; кадр с чужим `generation` до детектора не доходит;
 - главный поток — `asyncio`: WebSocket, STT, TTS, воспроизведение.
 
-Через границу поток → цикл едет **готовая реплика**, а не кадры
-(`loop.call_soon_threadsafe`). Обоснование — в
+Через границу поток → цикл едет один объект, а не кадры (`loop.call_soon_threadsafe`): в
+OVE-45 это `WakeWordEvent`, с OVE-46 — готовая реплика. Обоснование — в
 [.claude/knowledge/architecture.md](../../.claude/knowledge/architecture.md), раздел
 «`apps/voice` — голосовой клиент (OVE-44)».
 
@@ -48,8 +54,8 @@
 |---|---|---|---|
 | `main.py` | точка входа, сборка компонентов, `asyncio.run()`, завершение | OVE-45 | ✅ пока только просыпается |
 | `config.py` | `VoiceSettings` (`pydantic-settings`, `env_prefix="VOICE_"`) | OVE-45 | ✅ |
-| `audio.py` | формат конвейера (16 kHz, моно, int16, кадр 80 мс) и `FrameQueue` | OVE-45 | ✅ |
-| `state.py` | `idle → listening → thinking → speaking → idle`, гейт полудуплекса | OVE-45 | ✅ |
+| `audio.py` | формат конвейера (16 kHz, моно, int16, кадр 80 мс), `QueuedFrame` и `FrameQueue` | OVE-45 | ✅ |
+| `state.py` | `idle → listening → thinking → speaking → idle`, гейт полудуплекса, `generation` | OVE-45 | ✅ |
 | `capture.py` | `sounddevice.InputStream` → ограниченная очередь кадров | OVE-45 | ✅ |
 | `listener.py` | рабочий поток: кадры → wake word → событие срабатывания | OVE-45 | ✅ |
 | `wake_word.py` | порт `WakeWordDetector` + реализация на openWakeWord | OVE-45 | ✅ |

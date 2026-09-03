@@ -9,7 +9,7 @@ from typing import Final
 
 import numpy as np
 
-from apps.voice.audio import FrameQueue, Int16Frame
+from apps.voice.audio import FrameQueue, Int16Frame, QueuedFrame
 from apps.voice.state import VoiceStateMachine
 from apps.voice.wake_word import WakeWordDetector
 from libs.core.logging import get_logger
@@ -73,35 +73,52 @@ class WakeWordListener:
         self._epoch_provider = epoch_provider
         self._name = name
         self._buffer: Int16Frame = np.empty(0, dtype=np.int16)
-        self._enabled = state.wake_word_enabled
+        self._generation = state.generation
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._lifecycle = threading.Lock()
+
+    @property
+    def running(self) -> bool:
+        with self._lifecycle:
+            return self._thread is not None and self._thread.is_alive()
 
     def start(self) -> None:
-        if self._thread is not None:
-            raise RuntimeError("listener is already running")
+        with self._lifecycle:
+            if self._thread is not None:
+                if self._thread.is_alive():
+                    raise RuntimeError(
+                        "listener thread is still running: stop() has not joined it yet"
+                    )
+                self._thread = None
 
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
-        self._thread.start()
+            self._stop.clear()
+            thread = threading.Thread(target=self._run, name=self._name, daemon=True)
+            self._thread = thread
+            thread.start()
 
     def stop(self, timeout: float = 2.0) -> None:
-        self._stop.set()
-        if self._thread is None:
+        with self._lifecycle:
+            self._stop.set()
+            thread = self._thread
+            if thread is None:
+                return
+
+            thread.join(timeout)
+            if thread.is_alive():
+                logger.warning("voice.listener_stop_timed_out", thread=thread.name, timeout=timeout)
+                return
+
+            self._thread = None
+
+    def feed(self, frame: QueuedFrame) -> None:
+        enabled, generation = self._state.wake_word_gate()
+        if generation != self._generation:
+            self._reset(generation)
+        if not enabled or frame.generation != generation:
             return
 
-        self._thread.join(timeout)
-        self._thread = None
-
-    def feed(self, frame: Int16Frame) -> None:
-        enabled = self._state.wake_word_enabled
-        if enabled is not self._enabled:
-            self._enabled = enabled
-            self._reset()
-        if not enabled:
-            return
-
-        self._buffer = np.concatenate((self._buffer, frame))
+        self._buffer = np.concatenate((self._buffer, frame.samples))
         frame_size = self._detector.frame_size
         while self._buffer.size >= frame_size:
             chunk = self._buffer[:frame_size]
@@ -119,7 +136,7 @@ class WakeWordListener:
 
     def _trigger(self, score: float) -> None:
         if not self._state.try_begin_listening():
-            self._reset()
+            self._reset(self._state.generation)
             return
 
         epoch = self._epoch_provider()
@@ -129,8 +146,7 @@ class WakeWordListener:
             score=score,
             detected_at=time.monotonic(),
         )
-        self._enabled = False
-        self._reset()
+        self._reset(self._state.generation)
         logger.info(
             "voice.wake_word_detected",
             phrase=event.phrase,
@@ -139,6 +155,7 @@ class WakeWordListener:
         )
         self._on_wake_word(event)
 
-    def _reset(self) -> None:
+    def _reset(self, generation: int) -> None:
+        self._generation = generation
         self._buffer = np.empty(0, dtype=np.int16)
         self._detector.reset()

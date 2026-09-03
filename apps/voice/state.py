@@ -15,6 +15,7 @@ class VoiceStateMachine:
     def __init__(self, initial: VoiceState = VoiceState.IDLE) -> None:
         self._lock = threading.Lock()
         self._state = initial
+        self._generation = 0
 
     @property
     def state(self) -> VoiceState:
@@ -22,12 +23,25 @@ class VoiceStateMachine:
             return self._state
 
     @property
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    @property
     def wake_word_enabled(self) -> bool:
-        return self.state is VoiceState.IDLE
+        return self.wake_word_gate()[0]
+
+    def wake_word_gate(self) -> tuple[bool, int]:
+        with self._lock:
+            return self._state is VoiceState.IDLE, self._generation
 
     def set(self, state: VoiceState) -> None:
         with self._lock:
+            if state is self._state:
+                return
+
             self._state = state
+            self._generation += 1
 
     def try_begin_listening(self) -> bool:
         with self._lock:
@@ -35,4 +49,5 @@ class VoiceStateMachine:
                 return False
 
             self._state = VoiceState.LISTENING
+            self._generation += 1
             return True

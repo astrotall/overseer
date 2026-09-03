@@ -5,7 +5,14 @@ from typing import Any
 
 import sounddevice as sd
 
-from apps.voice.audio import CHANNELS, FRAME_SAMPLES, SAMPLE_RATE, FrameQueue, Int16Frame
+from apps.voice.audio import (
+    CHANNELS,
+    FRAME_SAMPLES,
+    SAMPLE_RATE,
+    FrameQueue,
+    GenerationProvider,
+    Int16Frame,
+)
 from libs.core.exceptions import ConfigurationError
 from libs.core.logging import get_logger
 
@@ -24,10 +31,12 @@ class AudioCapture:
         self,
         frames: FrameQueue,
         *,
+        generation_provider: GenerationProvider,
         device: str | int | None = None,
         blocksize: int = FRAME_SAMPLES,
     ) -> None:
         self._frames = frames
+        self._generation_provider = generation_provider
         self._device = device
         self._blocksize = blocksize
         self._stream: sd.InputStream | None = None
@@ -94,4 +103,4 @@ class AudioCapture:
         if status:
             self._overflows += 1
 
-        self._frames.put(indata[:, 0].copy())
+        self._frames.put(indata[:, 0].copy(), self._generation_provider())
