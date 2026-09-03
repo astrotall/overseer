@@ -6,13 +6,12 @@
 
 - `tests/conftest.py` — общие фикстуры (см. ниже);
 - `tests/integration/test_health.py` — smoke-тест `GET /health`;
-- `tests/unit/` — пока только `.gitkeep`, тестов нет: `uv run pytest tests/unit` соберёт
-  0 items;
+- `tests/unit/` — юнит-тесты бизнес-логики: конфиг, LLM-клиенты и фабрика, контракт
+  `libs/llm/base.py`, ORM-модель `Message`, системный промпт, конфиг и wake word `apps/voice`;
 - секции `[tool.pytest.ini_options]` и `[tool.coverage.*]` в `pyproject.toml`;
 - `.pre-commit-config.yaml` — хуки на трёх стадиях (`pre-commit`, `commit-msg`, `pre-push`);
 - `.github/workflows/ci.yml` — CI на GitHub Actions.
 
-Содержательных тестов пока нет — они появляются вместе с бизнес-логикой. Но
 pre-commit и CI реально работают: на них можно ссылаться как на действующие проверки.
 
 ## Что установлено
@@ -21,13 +20,21 @@ Dev-зависимости из `pyproject.toml` (группа `dev`): `pytest>=
 `pytest-cov>=6.0`, `httpx>=0.27`, `ruff>=0.8`, `mypy>=1.13`. Пакетный менеджер — `uv`,
 всё запускается через `uv run`.
 
+Отдельно живёт группа `voice` (`openwakeword`, `sounddevice`): она ставится только на
+машине, где реально слушают микрофон, — `uv sync --group voice`. Ни CI, ни образы `api` и
+`worker` её не ставят, поэтому тесты не имеют права импортировать `apps/voice/capture.py`,
+`apps/voice/playback.py` и `apps/voice/main.py` (там `sounddevice`) и создавать
+`OpenWakeWordDetector` (там `openwakeword`). Всё остальное в `apps/voice` — `audio.py`,
+`state.py`, `listener.py`, `config.py`, порт `WakeWordDetector` — импортируется без звуковой
+карты и покрывается юнит-тестами через фейковый детектор.
+
 ## Команды
 
 ```bash
 uv sync                       # установить зависимости, включая dev-группу
 
 uv run pytest                 # весь набор
-uv run pytest tests/unit      # только юнит-тесты (сейчас 0 items)
+uv run pytest tests/unit      # только юнит-тесты
 uv run pytest -m integration  # только интеграционные
 uv run pytest --cov --cov-report=term-missing   # с покрытием
 
