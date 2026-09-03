@@ -9,11 +9,12 @@ import structlog
 from libs.core.config import Settings, get_settings
 
 
-def configure_logging(settings: Settings | None = None) -> None:
+def configure_logging(settings: Settings | None = None, *, level: str | None = None) -> None:
     settings = settings or get_settings()
-    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    level_name = (level or settings.log_level).upper()
+    log_level = getattr(logging, level_name, logging.INFO)
 
-    logging.basicConfig(format="%(message)s", stream=sys.stdout, level=level)
+    logging.basicConfig(format="%(message)s", stream=sys.stdout, level=log_level)
 
     processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
@@ -31,7 +32,7 @@ def configure_logging(settings: Settings | None = None) -> None:
 
     structlog.configure(
         processors=[*processors, renderer],
-        wrapper_class=structlog.make_filtering_bound_logger(level),
+        wrapper_class=structlog.make_filtering_bound_logger(log_level),
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
