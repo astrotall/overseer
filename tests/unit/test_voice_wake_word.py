@@ -461,6 +461,85 @@ def test_the_reconnect_drains_the_queue_even_when_a_stale_frame_arrives_first() 
     assert events == []
 
 
+def test_an_echo_frame_outlives_a_gate_cycle_inside_speaking_and_dies_on_the_way_to_idle() -> None:
+    state = VoiceStateMachine(VoiceState.SPEAKING)
+    gate = ConnectionGate(state, opened=True)
+    detector = FakeDetector([0.9])
+    events: list[WakeWordEvent] = []
+    listener = VoiceListener(
+        frames=FrameQueue(),
+        detector=detector,
+        state=state,
+        endpointer=make_endpointer(),
+        on_wake_word=events.append,
+        on_utterance=lambda utterance: None,
+        threshold=0.5,
+        gate=gate,
+    )
+    generation = state.generation
+
+    gate.close()
+    listener.feed(queued(generation))
+    echo = queued(generation)
+    gate.open()
+    listener.feed(queued(generation))
+
+    assert state.generation == generation
+
+    listener.feed(echo)
+    assert detector.chunks == []
+
+    state.set(VoiceState.IDLE)
+    assert state.generation == generation + 1
+
+    listener.feed(echo)
+
+    assert detector.chunks == []
+    assert events == []
+
+
+def test_a_frame_queued_while_speaking_with_the_gate_shut_is_gone_after_the_reconnect() -> None:
+    state = VoiceStateMachine(VoiceState.SPEAKING)
+    gate = ConnectionGate(state, opened=True)
+    frames = FrameQueue()
+    detector = FakeDetector([0.9])
+    events: list[WakeWordEvent] = []
+    listener = VoiceListener(
+        frames=frames,
+        detector=detector,
+        state=state,
+        endpointer=make_endpointer(),
+        on_wake_word=events.append,
+        on_utterance=lambda utterance: None,
+        threshold=0.5,
+        gate=gate,
+    )
+    generation = state.generation
+
+    gate.close()
+    assert state.generation == generation
+
+    echo = queued(generation, value=7)
+    frames.put(echo.samples, echo.generation)
+    listener.feed(queued(generation))
+    assert state.state is VoiceState.SPEAKING
+
+    state.set(VoiceState.IDLE)
+    assert state.generation == generation + 1
+
+    gate.open()
+    assert state.generation == generation + 2
+
+    listener.feed(queued(state.generation))
+
+    assert frames.get(0.0) is None
+
+    listener.feed(echo)
+
+    assert detector.chunks == []
+    assert events == []
+
+
 def test_listener_rechunks_frames_to_the_size_the_detector_wants() -> None:
     detector = FakeDetector([0.0, 0.0, 0.0])
     listener, _, state = make_listener(detector)
