@@ -16,8 +16,16 @@ CI_SAFE_MODULES = [
     "apps.voice.stt",
     "apps.voice.cues",
     "apps.voice.pipeline",
+    "apps.voice.tts",
+    "apps.voice.playback",
 ]
-VOICE_ONLY_PACKAGES = ("sounddevice", "openwakeword", "faster_whisper", "ctranslate2")
+VOICE_ONLY_PACKAGES = (
+    "sounddevice",
+    "openwakeword",
+    "faster_whisper",
+    "ctranslate2",
+    "torch",
+)
 
 PROBE = """
 import sys
@@ -56,7 +64,17 @@ def test_module_imports_without_the_voice_dependency_group(module: str) -> None:
 
 def test_the_engine_classes_are_the_only_thing_that_needs_the_voice_group() -> None:
     from apps.voice.cues import BeepCue
+    from apps.voice.playback import SoundDeviceSink
     from apps.voice.stt import FasterWhisperSTT
+    from apps.voice.tts import SileroTTS
     from apps.voice.wake_word import OpenWakeWordDetector
 
-    assert all(callable(engine) for engine in (FasterWhisperSTT, OpenWakeWordDetector, BeepCue))
+    engines = (
+        FasterWhisperSTT,
+        OpenWakeWordDetector,
+        BeepCue,
+        SileroTTS,
+        SoundDeviceSink,
+    )
+
+    assert all(callable(engine) for engine in engines)

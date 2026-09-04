@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from apps.voice.config import VoiceSettings
+from apps.voice.config import FALLBACK_MODEL_FILE, MODEL_CACHE_DIR, VoiceSettings
 from apps.voice.wake_word import phrase_to_model_name
 
 
@@ -65,11 +65,15 @@ def test_empty_optional_keys_from_env_file_mean_unset(
 ) -> None:
     monkeypatch.setenv("VOICE_WAKE_WORD_MODEL_PATH", "")
     monkeypatch.setenv("VOICE_INPUT_DEVICE", "  ")
+    monkeypatch.setenv("VOICE_TTS_MODEL_PATH", "")
+    monkeypatch.setenv("VOICE_OUTPUT_DEVICE", "  ")
 
     settings = VoiceSettings()
 
     assert settings.wake_word_model_path is None
     assert settings.input_device is None
+    assert settings.tts_model_path is None
+    assert settings.output_device is None
 
 
 @pytest.mark.parametrize("max_utterance_s", [3.0, 1.5])
@@ -94,3 +98,42 @@ def test_a_workable_vad_pair_passes() -> None:
     settings = VoiceSettings(vad_start_timeout_s=3.0, vad_max_utterance_s=3.5)
 
     assert settings.vad_max_utterance_s == pytest.approx(3.5)
+
+
+def test_the_tts_voice_and_rate_come_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VOICE_TTS_VOICE", "baya")
+    monkeypatch.setenv("VOICE_TTS_SAMPLE_RATE", "48000")
+    monkeypatch.setenv("VOICE_TTS_DEVICE", "cuda")
+
+    settings = VoiceSettings()
+
+    assert settings.tts_voice == "baya"
+    assert settings.tts_sample_rate == 48_000
+    assert settings.tts_device == "cuda"
+
+
+@pytest.mark.parametrize("sample_rate", [16_000, 22_050, 0, 44_100])
+def test_a_rate_the_silero_model_cannot_render_is_rejected(sample_rate: int) -> None:
+    with pytest.raises(ValidationError, match="tts_sample_rate"):
+        VoiceSettings(tts_sample_rate=sample_rate)
+
+
+def test_without_a_local_model_the_file_is_derived_from_the_download_url() -> None:
+    settings = VoiceSettings(tts_model_url="https://models.silero.ai/models/tts/ru/v4_ru.pt")
+
+    assert settings.tts_model_file == MODEL_CACHE_DIR / "v4_ru.pt"
+
+
+def test_a_url_without_a_file_name_falls_back_to_a_stable_file_name() -> None:
+    settings = VoiceSettings(tts_model_url="https://models.silero.ai/")
+
+    assert settings.tts_model_file == MODEL_CACHE_DIR / FALLBACK_MODEL_FILE
+
+
+def test_an_explicit_model_path_wins_over_the_cache(tmp_path: Path) -> None:
+    weights = tmp_path / "own_voice.pt"
+    settings = VoiceSettings(tts_model_path=weights)
+
+    assert settings.tts_model_file == weights

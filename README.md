@@ -128,8 +128,8 @@ overseer/
 │   ├── executor/            # STUB: a separate Windows service outside Docker
 │   │                        #   (COM/Playwright); see apps/executor/README.md
 │   └── voice/               # a local cross-platform voice client outside Docker,
-│                            #   a /ws/chat client; mic to text works, TTS and the
-│                            #   socket pending — see apps/voice/README.md
+│                            #   a /ws/chat client; mic to text and text to speech work,
+│                            #   the socket is pending — see apps/voice/README.md
 ├── libs/
 │   ├── core/                # config (pydantic-settings), logging (structlog), exceptions
 │   ├── db/                  # SQLAlchemy Base, async engine/session, Redis, models
@@ -316,12 +316,13 @@ job; we do not merge a red CI.
 - ⏳ LLM clients — interfaces only, generation is not implemented;
 - ⏳ the tool registry and tool calling — not implemented;
 - ⏳ `apps/executor` (COM/Playwright) — an empty package with a README;
-- ⏳ `apps/voice` — microphone to text works (OVE-45, OVE-46): capture through
-  `sounddevice`, openWakeWord detection and utterance capture in a worker thread,
+- ⏳ `apps/voice` — both ends work, the middle is missing (OVE-45 … OVE-47): capture
+  through `sounddevice`, openWakeWord detection and utterance capture in a worker thread,
   energy-based endpointing, transcription with `faster-whisper`, and a filter that refuses
-  to forward an empty or low-confidence transcript; installed separately with
-  `uv sync --group voice`. The recognized text stops in an outgoing queue — TTS and the
-  `/ws/chat` client land in OVE-47 and OVE-48;
+  to forward an empty or low-confidence transcript; on the other end, `speak(text)`
+  synthesizes any string with Silero TTS and plays it back while the wake word is gated
+  off. Installed separately with `uv sync --group voice`. The recognized text still stops
+  in an outgoing queue: the `/ws/chat` client that joins the two ends lands in OVE-48;
 - ✅ test infrastructure: pytest + pytest-asyncio + pytest-cov, fixtures
   (`db_session`, `async_client`), the `GET /health` smoke test;
 - ✅ ruff, mypy, pre-commit and CI on GitHub Actions;

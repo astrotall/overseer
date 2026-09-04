@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Self
+from typing import Final, Self
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[2]
+MODEL_CACHE_DIR: Final[Path] = Path.home() / ".cache" / "overseer" / "tts"
+FALLBACK_MODEL_FILE: Final[str] = "silero_tts.pt"
+TTS_SAMPLE_RATES: Final[frozenset[int]] = frozenset({8_000, 24_000, 48_000})
 
 
 class VoiceSettings(BaseSettings):
@@ -98,7 +102,66 @@ class VoiceSettings(BaseSettings):
         gt=0.0,
         description="Потолок длины реплики: дольше — обрезаем и распознаём что есть",
     )
+    tts_model_url: str = Field(
+        default="https://models.silero.ai/models/tts/ru/v4_ru.pt",
+        description=(
+            "Откуда скачивается модель Silero TTS, если её нет локально. Русские голоса "
+            "живут в v4_ru.pt; другой язык — другой файл и другой набор голосов"
+        ),
+    )
+    tts_model_path: Path | None = Field(
+        default=None,
+        description=(
+            "Путь к уже скачанной модели Silero (.pt). Пусто — файл кладётся в "
+            f"{MODEL_CACHE_DIR} при первом запуске"
+        ),
+    )
+    tts_voice: str = Field(
+        default="xenia",
+        description=(
+            "Голос внутри модели. У v4_ru: aidar, baya, kseniya, xenia, eugene, random. "
+            "Неизвестное имя отклоняется при загрузке модели"
+        ),
+    )
+    tts_sample_rate: int = Field(
+        default=24_000,
+        description=(
+            "Частота синтеза: 8000, 24000 или 48000 Гц. Ею же открывается вывод звука — "
+            "конвейерные 16 kHz тут ни при чём, они про вход"
+        ),
+    )
+    tts_device: str = Field(
+        default="cpu",
+        description="Устройство инференса torch: cpu или cuda",
+    )
+    output_device: str | None = Field(
+        default=None,
+        description=(
+            "Устройство вывода для sounddevice: индекс или часть имени. None — системное "
+            "по умолчанию"
+        ),
+    )
     log_level: str = "INFO"
+
+    @property
+    def tts_model_file(self) -> Path:
+        if self.tts_model_path is not None:
+            return self.tts_model_path
+
+        name = Path(urlparse(self.tts_model_url).path).name or FALLBACK_MODEL_FILE
+        return MODEL_CACHE_DIR / name
+
+    @field_validator("tts_sample_rate")
+    @classmethod
+    def _check_tts_sample_rate(cls, value: int) -> int:
+        if value not in TTS_SAMPLE_RATES:
+            raise ValueError(
+                "tts_sample_rate должен быть одним из "
+                + ", ".join(str(rate) for rate in sorted(TTS_SAMPLE_RATES))
+                + f", получено {value}"
+            )
+
+        return value
 
     @field_validator("stt_language", mode="before")
     @classmethod
@@ -108,7 +171,9 @@ class VoiceSettings(BaseSettings):
 
         return value
 
-    @field_validator("wake_word_model_path", "input_device", mode="before")
+    @field_validator(
+        "wake_word_model_path", "input_device", "tts_model_path", "output_device", mode="before"
+    )
     @classmethod
     def _empty_string_means_unset(cls, value: object) -> object:
         if isinstance(value, str):
