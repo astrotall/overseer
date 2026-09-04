@@ -10,7 +10,7 @@ from typing import Final, Generic, TypeVar
 import numpy as np
 
 from apps.voice.audio import FrameQueue, Int16Frame, QueuedFrame
-from apps.voice.state import VoiceState, VoiceStateMachine
+from apps.voice.state import ConnectionGate, VoiceState, VoiceStateMachine
 from apps.voice.vad import Endpoint, Endpointer, EndpointOutcome
 from apps.voice.wake_word import WakeWordDetector
 from libs.core.logging import get_logger
@@ -73,6 +73,7 @@ class VoiceListener:
         on_utterance: UtteranceSink,
         threshold: float,
         epoch_provider: EpochProvider = unset_epoch,
+        gate: ConnectionGate | None = None,
         name: str = "voice-listener",
     ) -> None:
         if not 0.0 <= threshold <= 1.0:
@@ -86,9 +87,11 @@ class VoiceListener:
         self._on_utterance = on_utterance
         self._threshold = threshold
         self._epoch_provider = epoch_provider
+        self._gate = gate if gate is not None else ConnectionGate(opened=True)
         self._name = name
         self._buffer: Int16Frame = np.empty(0, dtype=np.int16)
         self._generation = state.generation
+        self._opened = self._gate.is_open
         self._recording_epoch: int | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -129,13 +132,15 @@ class VoiceListener:
 
     def feed(self, frame: QueuedFrame) -> None:
         state, generation = self._state.snapshot()
+        if not self._gate_open(state):
+            return
         if generation != self._generation:
             self._reset(generation)
         if frame.generation != generation:
             return
 
         if state is VoiceState.IDLE:
-            self._detect(frame.samples)
+            self._detect(frame.samples, generation)
         elif state is VoiceState.LISTENING:
             self._record(frame.samples)
 
@@ -145,7 +150,29 @@ class VoiceListener:
             if frame is not None:
                 self.feed(frame)
 
-    def _detect(self, samples: Int16Frame) -> None:
+    def _gate_open(self, state: VoiceState) -> bool:
+        is_open = self._gate.is_open
+        if is_open == self._opened:
+            return is_open
+
+        self._opened = is_open
+        if is_open:
+            self._resume()
+        else:
+            self._suspend(state)
+        return False
+
+    def _resume(self) -> None:
+        self._frames.clear()
+        self._reset(self._state.generation)
+        logger.info("voice.listener_resumed")
+
+    def _suspend(self, state: VoiceState) -> None:
+        logger.info("voice.listener_suspended", state=state.value)
+        self._state.try_transition(VoiceState.LISTENING, VoiceState.IDLE)
+        self._reset(self._state.generation)
+
+    def _detect(self, samples: Int16Frame, generation: int) -> None:
         self._buffer = np.concatenate((self._buffer, samples))
         frame_size = self._detector.frame_size
         while self._buffer.size >= frame_size:
@@ -153,11 +180,11 @@ class VoiceListener:
             self._buffer = self._buffer[frame_size:]
             score = self._detector.score(chunk)
             if score >= self._threshold:
-                self._trigger(score)
+                self._trigger(score, generation)
                 return
 
-    def _trigger(self, score: float) -> None:
-        if not self._state.try_begin_listening():
+    def _trigger(self, score: float, generation: int) -> None:
+        if not self._state.try_begin_listening(generation=generation):
             self._reset(self._state.generation)
             return
 

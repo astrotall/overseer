@@ -11,7 +11,8 @@
   wake word и листенер, эндпоинтинг (`vad.py`), фильтры транскрипта (`stt.py`),
   оркестрация (`pipeline.py`), нарезка текста под синтез (`tts.py`), воспроизведение через
   фейковый `AudioSink` (`playback.py`), переходы состояния на озвучке
-  (`test_voice_speaker.py`) и изоляция от CI (`test_voice_ci_isolation.py`);
+  (`test_voice_speaker.py`), клиент `/ws/chat` через фейковое соединение
+  (`test_voice_ws_client.py`) и изоляция от CI (`test_voice_ci_isolation.py`);
 - секции `[tool.pytest.ini_options]` и `[tool.coverage.*]` в `pyproject.toml`;
 - `.pre-commit-config.yaml` — хуки на трёх стадиях (`pre-commit`, `commit-msg`, `pre-push`);
 - `.github/workflows/ci.yml` — CI на GitHub Actions.
@@ -31,9 +32,13 @@ Dev-зависимости из `pyproject.toml` (группа `dev`): `pytest>=
 на верхнем уровне) и создавать `OpenWakeWordDetector`, `FasterWhisperSTT`, `BeepCue`,
 `SileroTTS` или `SoundDeviceSink` — эти пять классов импортируют свой движок лениво, внутри
 `__init__`. Всё остальное в `apps/voice` — `audio.py`, `state.py`, `listener.py`,
-`config.py`, `vad.py`, `pipeline.py`, `tts.py`, `playback.py` и порты `WakeWordDetector` /
-`SpeechToText` / `Cue` / `TextToSpeech` / `AudioSink` — импортируется без звуковой карты и
-покрывается юнит-тестами через фейки. `playback.py` в этом списке новичок: до OVE-47 он был
+`config.py`, `vad.py`, `pipeline.py`, `tts.py`, `playback.py`, `ws_client.py` и порты
+`WakeWordDetector` / `SpeechToText` / `Cue` / `TextToSpeech` / `AudioSink` — импортируется
+без звуковой карты и покрывается юнит-тестами через фейки. `ws_client.py` в этом списке
+особый случай: он вообще не тянет группу `voice` — `websockets` лежит в основных
+зависимостях, — а `WSConnection` и `Connector` сделаны портами, чтобы тесты гоняли клиент
+целиком (отправка, приём, дроп по epoch, реконнект с backoff, гейт готовности соединения) без
+сокета. `playback.py` в этом списке новичок: до OVE-47 он был
 не написан, а в задел OVE-44 попал как модуль с `sounddevice` на верхнем уровне; порт
 `AudioSink` сделал его CI-safe, и не-CI-safe остался один `capture.py`.
 

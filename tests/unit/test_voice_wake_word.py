@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -16,7 +17,7 @@ from apps.voice.listener import (
     WakeWordEvent,
     unset_epoch,
 )
-from apps.voice.state import VoiceState, VoiceStateMachine
+from apps.voice.state import ConnectionGate, VoiceState, VoiceStateMachine
 from apps.voice.vad import Endpointer, EndpointOutcome
 
 FRAME_SIZE = 4
@@ -45,6 +46,45 @@ class FakeDetector:
 
     def reset(self) -> None:
         self.resets += 1
+
+
+class RacingStateMachine(VoiceStateMachine):
+    def __init__(self, *, seen: VoiceState, switch_to: VoiceState) -> None:
+        super().__init__()
+        self._seen = seen
+        self._switch_to = switch_to
+        self.raced = False
+
+    def snapshot(self) -> tuple[VoiceState, int]:
+        observed = super().snapshot()
+        if not self.raced and observed[0] is self._seen:
+            self.raced = True
+            super().set(self._switch_to)
+        return observed
+
+
+class GateClosingDetector(FakeDetector):
+    def __init__(self, scores: list[float], gate: ConnectionGate) -> None:
+        super().__init__(scores)
+        self._gate = gate
+        self.raced = False
+
+    def score(self, frame: Int16Frame) -> float:
+        result = super().score(frame)
+        if not self.raced:
+            self.raced = True
+            self._gate.close()
+        return result
+
+
+class ClearingFrameQueue(FrameQueue):
+    def __init__(self, on_cleared: Callable[[], None]) -> None:
+        super().__init__()
+        self._on_cleared = on_cleared
+
+    def clear(self) -> None:
+        super().clear()
+        self._on_cleared()
 
 
 def make_frame(size: int = FRAME_SIZE, value: int = 1) -> Int16Frame:
@@ -90,6 +130,7 @@ def make_listener(
     epoch_provider: EpochProvider = unset_epoch,
     endpointer: Endpointer | None = None,
     utterances: list[Utterance] | None = None,
+    gate: ConnectionGate | None = None,
 ) -> tuple[VoiceListener, list[WakeWordEvent], VoiceStateMachine]:
     events: list[WakeWordEvent] = []
     state = state or VoiceStateMachine()
@@ -102,6 +143,7 @@ def make_listener(
         on_utterance=(utterances if utterances is not None else []).append,
         threshold=threshold,
         epoch_provider=epoch_provider,
+        gate=gate,
     )
     return listener, events, state
 
@@ -252,6 +294,280 @@ def test_listener_thread_drops_the_frames_the_queue_kept_from_the_previous_cycle
 
     assert events == []
     assert detector.chunks == []
+
+
+def test_listener_ignores_the_wake_word_while_the_connection_is_down() -> None:
+    detector = FakeDetector([0.9])
+    listener, events, state = make_listener(detector, gate=ConnectionGate())
+
+    feed_now(listener, state)
+    feed_now(listener, state)
+
+    assert events == []
+    assert detector.chunks == []
+    assert state.state is VoiceState.IDLE
+
+
+def test_listener_hears_the_wake_word_again_once_the_connection_is_back() -> None:
+    gate = ConnectionGate()
+    detector = FakeDetector([0.9])
+    listener, events, state = make_listener(detector, gate=gate)
+
+    feed_now(listener, state)
+    assert events == []
+
+    gate.open()
+    feed_now(listener, state)
+    feed_now(listener, state)
+
+    assert len(events) == 1
+    assert state.state is VoiceState.LISTENING
+
+
+def test_listener_abandons_the_recording_when_the_connection_drops() -> None:
+    gate = ConnectionGate(opened=True)
+    detector = FakeDetector([0.9])
+    utterances: list[Utterance] = []
+    listener, events, state = make_listener(detector, gate=gate, utterances=utterances)
+
+    feed_now(listener, state)
+    assert len(events) == 1
+    assert state.state is VoiceState.LISTENING
+
+    gate.close()
+    feed_now(listener, state)
+
+    assert state.state is VoiceState.IDLE
+    assert utterances == []
+
+
+def test_a_dropped_connection_does_not_interrupt_the_answer_being_spoken() -> None:
+    state = VoiceStateMachine(VoiceState.SPEAKING)
+    gate = ConnectionGate(state, opened=True)
+    listener, _, _ = make_listener(FakeDetector([0.9]), gate=gate, state=state)
+    generation = state.generation
+
+    gate.close()
+    feed_now(listener, state)
+
+    assert state.state is VoiceState.SPEAKING
+    assert state.generation == generation
+
+
+def test_listener_throws_away_the_frames_recorded_while_the_connection_was_down() -> None:
+    state = VoiceStateMachine()
+    gate = ConnectionGate(state, opened=True)
+    frames = FrameQueue()
+    detector = FakeDetector([0.9])
+    events: list[WakeWordEvent] = []
+    listener = VoiceListener(
+        frames=frames,
+        detector=detector,
+        state=state,
+        endpointer=make_endpointer(),
+        on_wake_word=events.append,
+        on_utterance=lambda utterance: None,
+        threshold=0.5,
+        gate=gate,
+    )
+
+    gate.close()
+    feed_now(listener, state)
+    frames.put(make_frame(), state.generation)
+    gate.open()
+    feed_now(listener, state)
+
+    assert frames.get(0.0) is None
+    assert detector.chunks == []
+    assert events == []
+
+
+def test_a_drop_does_not_undo_a_state_that_changed_under_the_listener() -> None:
+    state = RacingStateMachine(seen=VoiceState.LISTENING, switch_to=VoiceState.SPEAKING)
+    gate = ConnectionGate(state, opened=True)
+    utterances: list[Utterance] = []
+    listener, events, _ = make_listener(
+        FakeDetector([0.9]), gate=gate, state=state, utterances=utterances
+    )
+
+    feed_now(listener, state)
+    assert len(events) == 1
+    assert state.state is VoiceState.LISTENING
+
+    gate.close()
+    listener.feed(queued(state.generation))
+
+    assert state.raced is True
+    assert state.state is VoiceState.SPEAKING
+    assert utterances == []
+
+
+def test_a_gate_that_shuts_while_the_frame_is_scored_still_swallows_the_wake_word() -> None:
+    state = VoiceStateMachine()
+    gate = ConnectionGate(state, opened=True)
+    detector = GateClosingDetector([0.9], gate)
+    listener, events, _ = make_listener(detector, state=state, gate=gate)
+    generation = state.generation
+
+    feed_now(listener, state)
+
+    assert detector.raced is True
+    assert gate.is_open is False
+    assert events == []
+    assert state.state is VoiceState.IDLE
+    assert state.generation == generation + 1
+
+
+def test_a_frame_captured_while_the_connection_was_down_loses_the_race_with_the_clear() -> None:
+    state = VoiceStateMachine()
+    gate = ConnectionGate(state, opened=True)
+    detector = FakeDetector([0.9])
+    events: list[WakeWordEvent] = []
+    captured_generation = 0
+
+    def put_after_clear() -> None:
+        thread = threading.Thread(
+            target=frames.put, args=(make_frame(), captured_generation), name="portaudio"
+        )
+        thread.start()
+        thread.join(1.0)
+        assert not thread.is_alive()
+
+    frames = ClearingFrameQueue(put_after_clear)
+    listener = VoiceListener(
+        frames=frames,
+        detector=detector,
+        state=state,
+        endpointer=make_endpointer(),
+        on_wake_word=events.append,
+        on_utterance=lambda utterance: None,
+        threshold=0.5,
+        gate=gate,
+    )
+
+    gate.close()
+    listener.feed(queued(state.generation))
+    captured_generation = state.generation
+    gate.open()
+    listener.feed(queued(state.generation))
+
+    late = frames.get(0.0)
+    assert late is not None
+    assert late.generation == captured_generation
+
+    listener.feed(late)
+
+    assert detector.chunks == []
+    assert events == []
+
+
+def test_the_reconnect_drains_the_queue_even_when_a_stale_frame_arrives_first() -> None:
+    state = VoiceStateMachine()
+    gate = ConnectionGate(state, opened=True)
+    frames = FrameQueue()
+    detector = FakeDetector([0.9])
+    events: list[WakeWordEvent] = []
+    listener = VoiceListener(
+        frames=frames,
+        detector=detector,
+        state=state,
+        endpointer=make_endpointer(),
+        on_wake_word=events.append,
+        on_utterance=lambda utterance: None,
+        threshold=0.5,
+        gate=gate,
+    )
+
+    gate.close()
+    listener.feed(queued(state.generation))
+    stale = queued(state.generation)
+    frames.put(make_frame(value=2), stale.generation)
+    frames.put(make_frame(value=3), stale.generation)
+    gate.open()
+    listener.feed(stale)
+
+    assert frames.get(0.0) is None
+    assert detector.chunks == []
+    assert events == []
+
+
+def test_an_echo_frame_outlives_a_gate_cycle_inside_speaking_and_dies_on_the_way_to_idle() -> None:
+    state = VoiceStateMachine(VoiceState.SPEAKING)
+    gate = ConnectionGate(state, opened=True)
+    detector = FakeDetector([0.9])
+    events: list[WakeWordEvent] = []
+    listener = VoiceListener(
+        frames=FrameQueue(),
+        detector=detector,
+        state=state,
+        endpointer=make_endpointer(),
+        on_wake_word=events.append,
+        on_utterance=lambda utterance: None,
+        threshold=0.5,
+        gate=gate,
+    )
+    generation = state.generation
+
+    gate.close()
+    listener.feed(queued(generation))
+    echo = queued(generation)
+    gate.open()
+    listener.feed(queued(generation))
+
+    assert state.generation == generation
+
+    listener.feed(echo)
+    assert detector.chunks == []
+
+    state.set(VoiceState.IDLE)
+    assert state.generation == generation + 1
+
+    listener.feed(echo)
+
+    assert detector.chunks == []
+    assert events == []
+
+
+def test_a_frame_queued_while_speaking_with_the_gate_shut_is_gone_after_the_reconnect() -> None:
+    state = VoiceStateMachine(VoiceState.SPEAKING)
+    gate = ConnectionGate(state, opened=True)
+    frames = FrameQueue()
+    detector = FakeDetector([0.9])
+    events: list[WakeWordEvent] = []
+    listener = VoiceListener(
+        frames=frames,
+        detector=detector,
+        state=state,
+        endpointer=make_endpointer(),
+        on_wake_word=events.append,
+        on_utterance=lambda utterance: None,
+        threshold=0.5,
+        gate=gate,
+    )
+    generation = state.generation
+
+    gate.close()
+    assert state.generation == generation
+
+    echo = queued(generation, value=7)
+    frames.put(echo.samples, echo.generation)
+    listener.feed(queued(generation))
+    assert state.state is VoiceState.SPEAKING
+
+    state.set(VoiceState.IDLE)
+    assert state.generation == generation + 1
+
+    gate.open()
+    assert state.generation == generation + 2
+
+    listener.feed(queued(state.generation))
+
+    assert frames.get(0.0) is None
+
+    listener.feed(echo)
+
+    assert detector.chunks == []
+    assert events == []
 
 
 def test_listener_rechunks_frames_to_the_size_the_detector_wants() -> None:
@@ -494,6 +810,45 @@ def test_state_machine_bumps_the_generation_on_every_real_transition() -> None:
 
     assert state.generation == start + 3
     assert state.snapshot() == (VoiceState.IDLE, start + 3)
+
+
+def test_state_machine_refuses_a_transition_from_another_state() -> None:
+    state = VoiceStateMachine(VoiceState.SPEAKING)
+    generation = state.generation
+
+    assert state.try_transition(VoiceState.LISTENING, VoiceState.IDLE) is False
+    assert state.state is VoiceState.SPEAKING
+    assert state.generation == generation
+
+    assert state.try_transition(VoiceState.SPEAKING, VoiceState.IDLE) is True
+    assert state.snapshot() == (VoiceState.IDLE, generation + 1)
+
+
+def test_the_connection_gate_invalidates_the_frames_captured_around_it() -> None:
+    state = VoiceStateMachine()
+    gate = ConnectionGate(state, opened=True)
+    generation = state.generation
+
+    gate.close()
+    assert state.generation == generation + 1
+
+    gate.close()
+    assert state.generation == generation + 1
+
+    gate.open()
+    assert state.generation == generation + 2
+
+
+def test_the_connection_gate_leaves_the_generation_alone_while_speaking() -> None:
+    state = VoiceStateMachine(VoiceState.SPEAKING)
+    gate = ConnectionGate(state, opened=True)
+    generation = state.generation
+
+    gate.close()
+    gate.open()
+
+    assert state.generation == generation
+    assert gate.is_open is True
 
 
 def wake_up(

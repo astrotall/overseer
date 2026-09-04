@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from libs.schemas.chat import MessageResponse, SendMessageRequest
 from libs.schemas.common import ErrorResponse
@@ -25,3 +25,6 @@ class WSErrorPayload(ErrorResponse):
 class WSErrorMessage(BaseModel):
     type: Literal["error"] = "error"
     payload: WSErrorPayload
+
+
+WSServerMessage = Annotated[WSReplyMessage | WSErrorMessage, Field(discriminator="type")]
