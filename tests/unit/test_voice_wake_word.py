@@ -9,15 +9,19 @@ import pytest
 
 from apps.voice.audio import FrameQueue, Int16Frame, QueuedFrame
 from apps.voice.listener import (
-    AsyncioWakeWordSink,
+    AsyncioSink,
     EpochProvider,
+    Utterance,
+    VoiceListener,
     WakeWordEvent,
-    WakeWordListener,
     unset_epoch,
 )
 from apps.voice.state import VoiceState, VoiceStateMachine
+from apps.voice.vad import Endpointer, EndpointOutcome
 
 FRAME_SIZE = 4
+SPEECH_RMS = 4000
+SILENCE_RMS = 10
 
 
 class FakeDetector:
@@ -51,8 +55,27 @@ def queued(generation: int, size: int = FRAME_SIZE, value: int = 1) -> QueuedFra
     return QueuedFrame(generation=generation, samples=make_frame(size, value))
 
 
-def feed_now(listener: WakeWordListener, state: VoiceStateMachine, size: int = FRAME_SIZE) -> None:
-    listener.feed(queued(state.generation, size=size))
+def feed_now(
+    listener: VoiceListener,
+    state: VoiceStateMachine,
+    size: int = FRAME_SIZE,
+    value: int = 1,
+) -> None:
+    listener.feed(queued(state.generation, size=size, value=value))
+
+
+def make_endpointer(
+    *,
+    silence_s: float = 0.001,
+    start_timeout_s: float = 0.0005,
+    max_duration_s: float = 1.0,
+) -> Endpointer:
+    return Endpointer(
+        speech_rms=1000.0,
+        silence_s=silence_s,
+        start_timeout_s=start_timeout_s,
+        max_duration_s=max_duration_s,
+    )
 
 
 def threads_named(name: str) -> int:
@@ -65,14 +88,18 @@ def make_listener(
     state: VoiceStateMachine | None = None,
     threshold: float = 0.5,
     epoch_provider: EpochProvider = unset_epoch,
-) -> tuple[WakeWordListener, list[WakeWordEvent], VoiceStateMachine]:
+    endpointer: Endpointer | None = None,
+    utterances: list[Utterance] | None = None,
+) -> tuple[VoiceListener, list[WakeWordEvent], VoiceStateMachine]:
     events: list[WakeWordEvent] = []
     state = state or VoiceStateMachine()
-    listener = WakeWordListener(
+    listener = VoiceListener(
         frames=FrameQueue(),
         detector=detector,
         state=state,
+        endpointer=endpointer or make_endpointer(),
         on_wake_word=events.append,
+        on_utterance=(utterances if utterances is not None else []).append,
         threshold=threshold,
         epoch_provider=epoch_provider,
     )
@@ -201,11 +228,13 @@ def test_listener_thread_drops_the_frames_the_queue_kept_from_the_previous_cycle
         events.append(event)
         delivered.set()
 
-    listener = WakeWordListener(
+    listener = VoiceListener(
         frames=frames,
         detector=detector,
         state=state,
+        endpointer=make_endpointer(),
         on_wake_word=sink,
+        on_utterance=lambda utterance: None,
         threshold=0.5,
         name="voice-listener-stale",
     )
@@ -257,11 +286,13 @@ def test_listener_thread_delivers_the_event_from_the_frame_queue() -> None:
         events.append(event)
         delivered.set()
 
-    listener = WakeWordListener(
+    listener = VoiceListener(
         frames=frames,
         detector=detector,
         state=state,
+        endpointer=make_endpointer(),
         on_wake_word=sink,
+        on_utterance=lambda utterance: None,
         threshold=0.5,
         epoch_provider=lambda: 42,
     )
@@ -288,11 +319,13 @@ def test_listener_refuses_to_start_while_the_previous_thread_is_still_running() 
         entered.set()
         release.wait(timeout=5.0)
 
-    listener = WakeWordListener(
+    listener = VoiceListener(
         frames=frames,
         detector=detector,
         state=state,
+        endpointer=make_endpointer(),
         on_wake_word=blocking_sink,
+        on_utterance=lambda utterance: None,
         threshold=0.5,
         name=name,
     )
@@ -328,11 +361,13 @@ def test_listener_starts_again_once_the_stuck_thread_has_finished() -> None:
         entered.set()
         release.wait(timeout=5.0)
 
-    listener = WakeWordListener(
+    listener = VoiceListener(
         frames=frames,
         detector=detector,
         state=state,
+        endpointer=make_endpointer(),
         on_wake_word=blocking_sink,
+        on_utterance=lambda utterance: None,
         threshold=0.5,
         name=name,
     )
@@ -360,11 +395,13 @@ def test_listener_starts_exactly_one_thread_when_two_callers_race() -> None:
     detector = FakeDetector([])
     state = VoiceStateMachine()
     name = "voice-listener-race"
-    listener = WakeWordListener(
+    listener = VoiceListener(
         frames=FrameQueue(),
         detector=detector,
         state=state,
+        endpointer=make_endpointer(),
         on_wake_word=lambda event: None,
+        on_utterance=lambda utterance: None,
         threshold=0.5,
         name=name,
     )
@@ -395,7 +432,7 @@ def test_listener_starts_exactly_one_thread_when_two_callers_race() -> None:
 
 async def test_asyncio_sink_moves_the_event_from_the_worker_thread_into_the_loop() -> None:
     events: asyncio.Queue[WakeWordEvent] = asyncio.Queue()
-    sink = AsyncioWakeWordSink(asyncio.get_running_loop(), events)
+    sink = AsyncioSink(asyncio.get_running_loop(), events)
     event = WakeWordEvent(epoch=5, phrase="hey jarvis", score=0.9, detected_at=1.0)
 
     thread = threading.Thread(target=sink, args=(event,))
@@ -407,11 +444,13 @@ async def test_asyncio_sink_moves_the_event_from_the_worker_thread_into_the_loop
 
 def test_listener_rejects_a_threshold_outside_the_unit_interval() -> None:
     with pytest.raises(ValueError, match="threshold"):
-        WakeWordListener(
+        VoiceListener(
             frames=FrameQueue(),
             detector=FakeDetector([]),
             state=VoiceStateMachine(),
+            endpointer=make_endpointer(),
             on_wake_word=lambda event: None,
+            on_utterance=lambda utterance: None,
             threshold=1.5,
         )
 
@@ -454,4 +493,112 @@ def test_state_machine_bumps_the_generation_on_every_real_transition() -> None:
     state.set(VoiceState.IDLE)
 
     assert state.generation == start + 3
-    assert state.wake_word_gate() == (True, start + 3)
+    assert state.snapshot() == (VoiceState.IDLE, start + 3)
+
+
+def wake_up(
+    detector: FakeDetector,
+    *,
+    endpointer: Endpointer | None = None,
+    epoch_provider: EpochProvider = unset_epoch,
+) -> tuple[VoiceListener, VoiceStateMachine, list[Utterance]]:
+    utterances: list[Utterance] = []
+    listener, _, state = make_listener(
+        detector,
+        endpointer=endpointer,
+        utterances=utterances,
+        epoch_provider=epoch_provider,
+    )
+    feed_now(listener, state)
+    assert state.state is VoiceState.LISTENING
+    return listener, state, utterances
+
+
+def test_listener_records_the_utterance_after_the_wake_word() -> None:
+    listener, state, utterances = wake_up(FakeDetector([0.9]))
+
+    feed_now(listener, state, value=SPEECH_RMS)
+    assert utterances == []
+
+    feed_now(listener, state, value=SILENCE_RMS)
+    feed_now(listener, state, value=SILENCE_RMS)
+    feed_now(listener, state, value=SILENCE_RMS)
+    feed_now(listener, state, value=SILENCE_RMS)
+
+    assert len(utterances) == 1
+    assert utterances[0].outcome is EndpointOutcome.SPEECH
+    assert utterances[0].samples.size > 0
+    assert state.state is VoiceState.THINKING
+
+
+def test_listener_reports_a_false_trigger_when_no_speech_follows() -> None:
+    listener, state, utterances = wake_up(FakeDetector([0.9]))
+
+    feed_now(listener, state, value=SILENCE_RMS)
+    feed_now(listener, state, value=SILENCE_RMS)
+    feed_now(listener, state, value=SILENCE_RMS)
+
+    assert len(utterances) == 1
+    assert utterances[0].outcome is EndpointOutcome.NO_SPEECH
+    assert utterances[0].samples.size == 0
+    assert state.state is VoiceState.THINKING
+
+
+def test_listener_does_not_feed_the_detector_while_recording() -> None:
+    detector = FakeDetector([0.9])
+    listener, state, _ = wake_up(detector)
+    recorded = len(detector.chunks)
+
+    feed_now(listener, state, value=SPEECH_RMS)
+
+    assert len(detector.chunks) == recorded
+
+
+def test_listener_keeps_the_epoch_captured_at_the_wake_word() -> None:
+    epoch = 11
+    listener, state, utterances = wake_up(FakeDetector([0.9]), epoch_provider=lambda: epoch)
+
+    feed_now(listener, state, value=SPEECH_RMS)
+    for _ in range(4):
+        feed_now(listener, state, value=SILENCE_RMS)
+
+    assert [utterance.epoch for utterance in utterances] == [epoch]
+
+
+def test_listener_drops_the_utterance_when_the_connection_reconnected_meanwhile() -> None:
+    epoch = 11
+
+    def current_epoch() -> int:
+        return epoch
+
+    listener, state, utterances = wake_up(FakeDetector([0.9]), epoch_provider=current_epoch)
+
+    feed_now(listener, state, value=SPEECH_RMS)
+    epoch = 12
+    for _ in range(4):
+        feed_now(listener, state, value=SILENCE_RMS)
+
+    assert utterances == []
+    assert state.state is VoiceState.IDLE
+
+
+def test_listener_truncates_an_utterance_that_never_ends() -> None:
+    endpointer = make_endpointer(silence_s=1.0, start_timeout_s=0.0005, max_duration_s=0.001)
+    listener, state, utterances = wake_up(FakeDetector([0.9]), endpointer=endpointer)
+
+    for _ in range(4):
+        feed_now(listener, state, value=SPEECH_RMS)
+
+    assert len(utterances) == 1
+    assert utterances[0].truncated is True
+    assert utterances[0].outcome is EndpointOutcome.SPEECH
+
+
+def test_listener_forgets_a_half_recorded_utterance_when_the_state_changes() -> None:
+    listener, state, utterances = wake_up(FakeDetector([0.9, 0.9]))
+
+    feed_now(listener, state, value=SPEECH_RMS)
+    state.set(VoiceState.IDLE)
+    feed_now(listener, state, value=SILENCE_RMS)
+
+    assert utterances == []

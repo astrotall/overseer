@@ -29,11 +29,11 @@ class VoiceStateMachine:
 
     @property
     def wake_word_enabled(self) -> bool:
-        return self.wake_word_gate()[0]
+        return self.snapshot()[0] is VoiceState.IDLE
 
-    def wake_word_gate(self) -> tuple[bool, int]:
+    def snapshot(self) -> tuple[VoiceState, int]:
         with self._lock:
-            return self._state is VoiceState.IDLE, self._generation
+            return self._state, self._generation
 
     def set(self, state: VoiceState) -> None:
         with self._lock:

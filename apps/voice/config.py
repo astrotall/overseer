@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Self
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -48,7 +49,64 @@ class VoiceSettings(BaseSettings):
             "по умолчанию"
         ),
     )
+    stt_model: str = Field(
+        default="small",
+        description=(
+            "Модель faster-whisper: tiny/base/small/medium/large-v3 или путь к своей. "
+            "Крупнее — точнее и медленнее; small — компромисс для CPU"
+        ),
+    )
+    stt_device: str = Field(
+        default="auto",
+        description="Устройство инференса CTranslate2: auto, cpu или cuda",
+    )
+    stt_compute_type: str = Field(
+        default="int8",
+        description="Квантизация CTranslate2: int8, int8_float16, float16, float32",
+    )
+    stt_language: str | None = Field(
+        default="ru",
+        description=(
+            "Язык распознавания по ISO 639-1. Пусто — автоопределение, ненадёжное на "
+            "коротких репликах"
+        ),
+    )
+    vad_speech_rms: float = Field(
+        default=300.0,
+        gt=0.0,
+        description=(
+            "Порог речи по RMS кадра (шкала int16): выше — конец реплики находится "
+            "раньше и шумная комната не мешает, ниже — слышно тихую речь. "
+            "Единственная ручка калибровки VAD, крутится по месту"
+        ),
+    )
+    vad_silence_s: float = Field(
+        default=0.8,
+        gt=0.0,
+        description="Пауза, после которой реплика считается законченной",
+    )
+    vad_start_timeout_s: float = Field(
+        default=3.0,
+        gt=0.0,
+        description=(
+            "Сколько ждать начала речи после wake word. Истекло — ложное срабатывание, "
+            "реплики не было"
+        ),
+    )
+    vad_max_utterance_s: float = Field(
+        default=30.0,
+        gt=0.0,
+        description="Потолок длины реплики: дольше — обрезаем и распознаём что есть",
+    )
     log_level: str = "INFO"
+
+    @field_validator("stt_language", mode="before")
+    @classmethod
+    def _blank_language_means_auto(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower() or None
+
+        return value
 
     @field_validator("wake_word_model_path", "input_device", mode="before")
     @classmethod
@@ -57,6 +115,17 @@ class VoiceSettings(BaseSettings):
             return value.strip() or None
 
         return value
+
+    @model_validator(mode="after")
+    def _check_vad_limits(self) -> Self:
+        if self.vad_max_utterance_s <= self.vad_start_timeout_s:
+            raise ValueError(
+                "vad_max_utterance_s должен превышать vad_start_timeout_s: потолок длины "
+                f"реплики {self.vad_max_utterance_s} с не даёт дождаться начала речи за "
+                f"{self.vad_start_timeout_s} с"
+            )
+
+        return self
 
 
 @lru_cache(maxsize=1)

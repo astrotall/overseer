@@ -6,32 +6,70 @@ import contextlib
 from apps.voice.audio import FrameQueue
 from apps.voice.capture import AudioCapture, resolve_device
 from apps.voice.config import VoiceSettings, get_voice_settings
-from apps.voice.listener import AsyncioWakeWordSink, WakeWordEvent, WakeWordListener
-from apps.voice.state import VoiceState, VoiceStateMachine
+from apps.voice.cues import BeepCue
+from apps.voice.listener import AsyncioSink, Utterance, VoiceListener, WakeWordEvent
+from apps.voice.pipeline import TRANSCRIPT_QUEUE_MAXSIZE, Transcript, VoicePipeline
+from apps.voice.state import VoiceStateMachine
+from apps.voice.stt import FasterWhisperSTT
+from apps.voice.vad import Endpointer
 from apps.voice.wake_word import OpenWakeWordDetector
 from libs.core.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
 
-WAKE_WORD_COOLDOWN_S = 1.5
+
+async def announce_wake_words(events: asyncio.Queue[WakeWordEvent], frames: FrameQueue) -> None:
+    while True:
+        event = await events.get()
+        logger.info(
+            "voice.listening_started",
+            phrase=event.phrase,
+            score=round(event.score, 3),
+            epoch=event.epoch,
+            dropped_frames=frames.dropped,
+        )
+
+
+async def drain_transcripts(transcripts: asyncio.Queue[Transcript]) -> None:
+    while True:
+        transcript = await transcripts.get()
+        logger.info(
+            "voice.transcript",
+            epoch=transcript.epoch,
+            language=transcript.language,
+            duration_s=round(transcript.duration_s, 2),
+            chars=len(transcript.text),
+        )
 
 
 async def run(settings: VoiceSettings) -> None:
+    loop = asyncio.get_running_loop()
     frames = FrameQueue()
     state = VoiceStateMachine()
-    detector = OpenWakeWordDetector.from_settings(settings)
     events: asyncio.Queue[WakeWordEvent] = asyncio.Queue()
-    listener = WakeWordListener(
+    utterances: asyncio.Queue[Utterance] = asyncio.Queue()
+    transcripts: asyncio.Queue[Transcript] = asyncio.Queue(maxsize=TRANSCRIPT_QUEUE_MAXSIZE)
+
+    listener = VoiceListener(
         frames=frames,
-        detector=detector,
+        detector=OpenWakeWordDetector.from_settings(settings),
+        endpointer=Endpointer.from_settings(settings),
         state=state,
-        on_wake_word=AsyncioWakeWordSink(asyncio.get_running_loop(), events),
+        on_wake_word=AsyncioSink(loop, events),
+        on_utterance=AsyncioSink(loop, utterances),
         threshold=settings.wake_word_threshold,
     )
     capture = AudioCapture(
         frames,
         generation_provider=lambda: state.generation,
         device=resolve_device(settings.input_device),
+    )
+    pipeline = VoicePipeline(
+        utterances=utterances,
+        transcripts=transcripts,
+        stt=FasterWhisperSTT.from_settings(settings),
+        state=state,
+        cue=BeepCue(),
     )
 
     try:
@@ -42,17 +80,10 @@ async def run(settings: VoiceSettings) -> None:
             phrase=settings.wake_word_phrase,
             threshold=settings.wake_word_threshold,
         )
-        while True:
-            event = await events.get()
-            logger.info(
-                "voice.wake_word",
-                phrase=event.phrase,
-                score=round(event.score, 3),
-                epoch=event.epoch,
-                dropped_frames=frames.dropped,
-            )
-            await asyncio.sleep(WAKE_WORD_COOLDOWN_S)
-            state.set(VoiceState.IDLE)
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(announce_wake_words(events, frames))
+            tasks.create_task(pipeline.run())
+            tasks.create_task(drain_transcripts(transcripts))
     finally:
         capture.stop()
         listener.stop()
