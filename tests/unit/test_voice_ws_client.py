@@ -9,10 +9,20 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
+import numpy as np
 import pytest
 
-from apps.voice.pipeline import Transcript
+from apps.voice.audio import Int16Frame
+from apps.voice.cues import CueKind
+from apps.voice.listener import Utterance
+from apps.voice.pipeline import (
+    TRANSCRIPT_QUEUE_MAXSIZE,
+    Transcript,
+    VoicePipeline,
+)
 from apps.voice.state import VoiceState, VoiceStateMachine
+from apps.voice.stt import Segment, Transcription
+from apps.voice.vad import EndpointOutcome
 from apps.voice.ws_client import (
     ERROR_SPEECH,
     RECONNECT_MAX_S,
@@ -42,11 +52,13 @@ class FakeConnection:
         *incoming: str | BaseException,
         answer: bool = False,
         gate: asyncio.Event | None = None,
+        stall: int = 0,
     ) -> None:
         self.sent: list[str] = []
         self.closed = False
         self._incoming = list(incoming)
         self._answer = answer
+        self._stall = stall
         self._gate = gate if gate is not None else asyncio.Event()
         if not answer and gate is None:
             self._gate.set()
@@ -55,6 +67,8 @@ class FakeConnection:
         self.sent.append(message)
         if self._answer:
             self._gate.set()
+        for _ in range(self._stall):
+            await asyncio.sleep(0)
 
     async def recv(self) -> str | bytes:
         await self._gate.wait()
@@ -73,7 +87,7 @@ class FakeConnection:
 
 
 class FakeConnector:
-    def __init__(self, *connections: FakeConnection | BaseException) -> None:
+    def __init__(self, *connections: FakeConnection | BaseException | asyncio.Event) -> None:
         self.urls: list[str] = []
         self._connections = list(connections)
 
@@ -82,6 +96,9 @@ class FakeConnector:
 
         @asynccontextmanager
         async def session() -> AsyncIterator[WSConnection]:
+            while self._connections and isinstance(self._connections[0], asyncio.Event):
+                await self._connections.pop(0).wait()
+
             if not self._connections:
                 await asyncio.Event().wait()
 
@@ -115,6 +132,33 @@ def error(code: int = 503) -> str:
                 "code": code,
             },
         }
+    )
+
+
+class FakeSTT:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    async def transcribe(self, samples: Int16Frame) -> Transcription:
+        return Transcription(
+            text=self._text,
+            language="ru",
+            segments=(Segment(text=self._text, no_speech_prob=0.05, avg_logprob=-0.2),),
+        )
+
+
+class SilentCue:
+    async def play(self, kind: CueKind) -> None:
+        return None
+
+
+def utterance(epoch: int) -> Utterance:
+    return Utterance(
+        epoch=epoch,
+        outcome=EndpointOutcome.SPEECH,
+        samples=np.ones(16_000, dtype=np.int16),
+        duration_s=2.0,
+        truncated=False,
     )
 
 
@@ -407,3 +451,113 @@ class TestReconnect:
             seen.append(client.epoch)
 
         assert seen == [1, 3, 5]
+
+
+class TestGate:
+    async def test_the_gate_opens_once_the_socket_is_up(self) -> None:
+        client = make_client(FakeConnector(FakeConnection()))
+
+        assert not client.gate.is_open
+
+        async with running(client):
+            await eventually(lambda: client.gate.is_open)
+
+    async def test_the_gate_stays_closed_for_the_whole_reconnect_pause(self) -> None:
+        drop = asyncio.Event()
+        hold = asyncio.Event()
+        connector = FakeConnector(
+            FakeConnection(ConnectionResetError("соединение сброшено"), gate=drop),
+            hold,
+            FakeConnection(gate=asyncio.Event()),
+        )
+        client = make_client(connector)
+
+        async with running(client):
+            await eventually(lambda: client.gate.is_open)
+            drop.set()
+            await eventually(lambda: not client.gate.is_open)
+            await asyncio.sleep(0.02)
+
+            assert not client.gate.is_open
+
+            hold.set()
+            await eventually(lambda: client.gate.is_open)
+
+    async def test_a_drop_leaves_the_answer_being_spoken_alone(self) -> None:
+        state = VoiceStateMachine(VoiceState.SPEAKING)
+        drop = asyncio.Event()
+        hold = asyncio.Event()
+        connector = FakeConnector(
+            FakeConnection(ConnectionResetError("соединение сброшено"), gate=drop),
+            hold,
+            FakeConnection(gate=asyncio.Event()),
+        )
+        client = make_client(connector, state=state)
+
+        async with running(client):
+            await eventually(lambda: client.gate.is_open)
+            generation = state.generation
+            drop.set()
+            await eventually(lambda: not client.gate.is_open)
+
+            assert state.state is VoiceState.SPEAKING
+            assert state.generation == generation
+
+
+class TestEarlyReply:
+    async def test_a_reply_that_beats_the_end_of_send_is_still_handled(self) -> None:
+        connection = FakeConnection(reply(), answer=True, stall=3)
+        transcripts: asyncio.Queue[Transcript] = asyncio.Queue(maxsize=1)
+        speaker = FakeSpeaker()
+        state = VoiceStateMachine()
+        client = make_client(
+            FakeConnector(connection), transcripts=transcripts, speaker=speaker, state=state
+        )
+
+        async with running(client):
+            await eventually(lambda: client.epoch == FIRST_EPOCH)
+            state.set(VoiceState.THINKING)
+            transcripts.put_nowait(transcript(epoch=FIRST_EPOCH))
+            await eventually(lambda: speaker.spoken)
+            await eventually(lambda: state.state is VoiceState.IDLE)
+
+        assert speaker.spoken == ["В Москве плюс семь и дождь."]
+
+
+class TestReconnectedTurn:
+    async def test_the_socket_gets_what_was_said_after_the_reconnect_not_before(self) -> None:
+        drop = asyncio.Event()
+        hold = asyncio.Event()
+        first = FakeConnection(ConnectionResetError("соединение сброшено"), gate=drop)
+        second = FakeConnection()
+        transcripts: asyncio.Queue[Transcript] = asyncio.Queue(maxsize=TRANSCRIPT_QUEUE_MAXSIZE)
+        state = VoiceStateMachine()
+        client = make_client(
+            FakeConnector(first, hold, second), transcripts=transcripts, state=state
+        )
+        pipeline = VoicePipeline(
+            utterances=asyncio.Queue(),
+            transcripts=transcripts,
+            stt=FakeSTT("отправь письмо"),
+            state=state,
+            cue=SilentCue(),
+            epoch_provider=lambda: client.epoch,
+        )
+
+        async with running(client):
+            await eventually(lambda: client.gate.is_open)
+            drop.set()
+            await eventually(lambda: not client.gate.is_open)
+            transcripts.put_nowait(transcript(epoch=FIRST_EPOCH, text="удали черновик"))
+            hold.set()
+            await eventually(lambda: client.epoch == SECOND_EPOCH)
+
+            state.set(VoiceState.THINKING)
+            await pipeline.handle(utterance(SECOND_EPOCH))
+            await eventually(lambda: second.sent)
+            await asyncio.sleep(0.02)
+
+        assert first.sent == []
+        assert [envelope["payload"]["content"] for envelope in second.envelopes] == [
+            "отправь письмо"
+        ]

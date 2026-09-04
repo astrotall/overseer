@@ -15,7 +15,7 @@ from websockets.exceptions import WebSocketException
 from apps.voice.config import VoiceSettings
 from apps.voice.listener import UNSET_EPOCH
 from apps.voice.pipeline import Transcript
-from apps.voice.state import VoiceState, VoiceStateMachine
+from apps.voice.state import ConnectionGate, VoiceState, VoiceStateMachine
 from libs.core.logging import get_logger
 from libs.schemas.chat import SendMessageRequest
 from libs.schemas.ws import WSIncomingMessage, WSReplyMessage, WSServerMessage
@@ -78,6 +78,7 @@ class VoiceWSClient:
         speaker: Speaker,
         state: VoiceStateMachine,
         conversation_id: uuid.UUID | None = None,
+        gate: ConnectionGate | None = None,
         connector: Connector = websocket_connector,
         reconnect_initial_s: float = RECONNECT_INITIAL_S,
         reconnect_max_s: float = RECONNECT_MAX_S,
@@ -94,6 +95,7 @@ class VoiceWSClient:
         self._transcripts = transcripts
         self._speaker = speaker
         self._state = state
+        self._gate = gate if gate is not None else ConnectionGate()
         self._connector = connector
         self._reconnect_initial_s = reconnect_initial_s
         self._reconnect_max_s = reconnect_max_s
@@ -120,6 +122,10 @@ class VoiceWSClient:
         )
 
     @property
+    def gate(self) -> ConnectionGate:
+        return self._gate
+
+    @property
     def url(self) -> str:
         return self._url
 
@@ -144,6 +150,7 @@ class VoiceWSClient:
                 connected = True
                 self._awaiting_reply = False
                 self._next_epoch()
+                self._gate.open()
                 logger.info("voice.ws_connected", url=self._url, epoch=self._epoch)
                 await self._serve(connection)
         except TRANSPORT_ERRORS as exc:
@@ -158,6 +165,7 @@ class VoiceWSClient:
         else:
             logger.info("voice.ws_closed", epoch=self._epoch)
         finally:
+            self._gate.close()
             if connected:
                 self._next_epoch()
             self._awaiting_reply = False
@@ -208,8 +216,8 @@ class VoiceWSClient:
             self._release_turn()
             return
 
-        await connection.send(envelope.model_dump_json())
         self._awaiting_reply = True
+        await connection.send(envelope.model_dump_json())
         logger.info(
             "voice.ws_message_sent",
             epoch=transcript.epoch,

@@ -227,6 +227,30 @@ async def test_pipeline_drops_a_transcript_when_nobody_drained_the_queue() -> No
     assert state.state is VoiceState.IDLE
 
 
+async def test_a_stale_transcript_in_the_queue_gives_way_to_the_one_just_said() -> None:
+    stt = FakeSTT(transcription("вторая"))
+    pipeline, transcripts, _, state = make_pipeline(stt, epoch_provider=lambda: 2)
+    transcripts.put_nowait(Transcript(epoch=1, text="первая", language="ru", duration_s=2.0))
+
+    await pipeline.handle(utterance(epoch=2))
+
+    assert transcripts.get_nowait().text == "вторая"
+    assert transcripts.empty()
+    assert state.state is VoiceState.THINKING
+
+
+async def test_a_queued_transcript_of_the_current_epoch_is_not_displaced() -> None:
+    stt = FakeSTT(transcription("вторая"))
+    pipeline, transcripts, _, state = make_pipeline(stt, epoch_provider=lambda: 2)
+    transcripts.put_nowait(Transcript(epoch=2, text="первая", language="ru", duration_s=2.0))
+
+    await pipeline.handle(utterance(epoch=2))
+
+    assert transcripts.get_nowait().text == "первая"
+    assert transcripts.empty()
+    assert state.state is VoiceState.IDLE
+
+
 async def test_a_published_transcript_leaves_the_turn_with_the_ws_client() -> None:
     stt = FakeSTT(transcription("удали черновик"))
     pipeline, _, _, state = make_pipeline(stt)

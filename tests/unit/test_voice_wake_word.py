@@ -16,7 +16,7 @@ from apps.voice.listener import (
     WakeWordEvent,
     unset_epoch,
 )
-from apps.voice.state import VoiceState, VoiceStateMachine
+from apps.voice.state import ConnectionGate, VoiceState, VoiceStateMachine
 from apps.voice.vad import Endpointer, EndpointOutcome
 
 FRAME_SIZE = 4
@@ -90,6 +90,7 @@ def make_listener(
     epoch_provider: EpochProvider = unset_epoch,
     endpointer: Endpointer | None = None,
     utterances: list[Utterance] | None = None,
+    gate: ConnectionGate | None = None,
 ) -> tuple[VoiceListener, list[WakeWordEvent], VoiceStateMachine]:
     events: list[WakeWordEvent] = []
     state = state or VoiceStateMachine()
@@ -102,6 +103,7 @@ def make_listener(
         on_utterance=(utterances if utterances is not None else []).append,
         threshold=threshold,
         epoch_provider=epoch_provider,
+        gate=gate,
     )
     return listener, events, state
 
@@ -252,6 +254,92 @@ def test_listener_thread_drops_the_frames_the_queue_kept_from_the_previous_cycle
 
     assert events == []
     assert detector.chunks == []
+
+
+def test_listener_ignores_the_wake_word_while_the_connection_is_down() -> None:
+    detector = FakeDetector([0.9])
+    listener, events, state = make_listener(detector, gate=ConnectionGate())
+
+    feed_now(listener, state)
+    feed_now(listener, state)
+
+    assert events == []
+    assert detector.chunks == []
+    assert state.state is VoiceState.IDLE
+
+
+def test_listener_hears_the_wake_word_again_once_the_connection_is_back() -> None:
+    gate = ConnectionGate()
+    detector = FakeDetector([0.9])
+    listener, events, state = make_listener(detector, gate=gate)
+
+    feed_now(listener, state)
+    assert events == []
+
+    gate.open()
+    feed_now(listener, state)
+    feed_now(listener, state)
+
+    assert len(events) == 1
+    assert state.state is VoiceState.LISTENING
+
+
+def test_listener_abandons_the_recording_when_the_connection_drops() -> None:
+    gate = ConnectionGate(opened=True)
+    detector = FakeDetector([0.9])
+    utterances: list[Utterance] = []
+    listener, events, state = make_listener(detector, gate=gate, utterances=utterances)
+
+    feed_now(listener, state)
+    assert len(events) == 1
+    assert state.state is VoiceState.LISTENING
+
+    gate.close()
+    feed_now(listener, state)
+
+    assert state.state is VoiceState.IDLE
+    assert utterances == []
+
+
+def test_a_dropped_connection_does_not_interrupt_the_answer_being_spoken() -> None:
+    gate = ConnectionGate(opened=True)
+    state = VoiceStateMachine(VoiceState.SPEAKING)
+    listener, _, _ = make_listener(FakeDetector([0.9]), gate=gate, state=state)
+    generation = state.generation
+
+    gate.close()
+    feed_now(listener, state)
+
+    assert state.state is VoiceState.SPEAKING
+    assert state.generation == generation
+
+
+def test_listener_throws_away_the_frames_recorded_while_the_connection_was_down() -> None:
+    gate = ConnectionGate(opened=True)
+    frames = FrameQueue()
+    detector = FakeDetector([0.9])
+    state = VoiceStateMachine()
+    events: list[WakeWordEvent] = []
+    listener = VoiceListener(
+        frames=frames,
+        detector=detector,
+        state=state,
+        endpointer=make_endpointer(),
+        on_wake_word=events.append,
+        on_utterance=lambda utterance: None,
+        threshold=0.5,
+        gate=gate,
+    )
+
+    gate.close()
+    feed_now(listener, state)
+    frames.put(make_frame(), state.generation)
+    gate.open()
+    feed_now(listener, state)
+
+    assert frames.get(0.0) is None
+    assert detector.chunks == []
+    assert events == []
 
 
 def test_listener_rechunks_frames_to_the_size_the_detector_wants() -> None:

@@ -51,3 +51,20 @@ class VoiceStateMachine:
             self._state = VoiceState.LISTENING
             self._generation += 1
             return True
+
+
+class ConnectionGate:
+    def __init__(self, *, opened: bool = False) -> None:
+        self._opened = threading.Event()
+        if opened:
+            self._opened.set()
+
+    @property
+    def is_open(self) -> bool:
+        return self._opened.is_set()
+
+    def open(self) -> None:
+        self._opened.set()
+
+    def close(self) -> None:
+        self._opened.clear()

@@ -64,6 +64,7 @@ async def run(settings: VoiceSettings) -> None:
         on_utterance=AsyncioSink(loop, utterances),
         threshold=settings.wake_word_threshold,
         epoch_provider=lambda: client.epoch,
+        gate=client.gate,
     )
     capture = AudioCapture(
         frames,

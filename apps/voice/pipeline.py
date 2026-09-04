@@ -120,9 +120,7 @@ class VoicePipeline:
             )
             return False
 
-        try:
-            self._transcripts.put_nowait(transcript)
-        except asyncio.QueueFull:
+        if not self._enqueue(transcript, current):
             logger.warning("voice.transcript_dropped_queue_full", epoch=transcript.epoch)
             return False
 
@@ -132,6 +130,41 @@ class VoicePipeline:
             language=transcript.language,
             duration_s=round(transcript.duration_s, 2),
             chars=len(transcript.text),
+        )
+        return True
+
+    def _enqueue(self, transcript: Transcript, current: int) -> bool:
+        try:
+            self._transcripts.put_nowait(transcript)
+        except asyncio.QueueFull:
+            pass
+        else:
+            return True
+
+        if not self._evict_stale(current):
+            return False
+
+        try:
+            self._transcripts.put_nowait(transcript)
+        except asyncio.QueueFull:
+            return False
+
+        return True
+
+    def _evict_stale(self, current: int) -> bool:
+        try:
+            queued = self._transcripts.get_nowait()
+        except asyncio.QueueEmpty:
+            return True
+
+        if queued.epoch == current:
+            self._transcripts.put_nowait(queued)
+            return False
+
+        logger.info(
+            "voice.transcript_evicted_stale_epoch",
+            epoch=queued.epoch,
+            current=current,
         )
         return True
 
