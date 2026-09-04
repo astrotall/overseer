@@ -140,7 +140,7 @@ class VoiceListener:
             return
 
         if state is VoiceState.IDLE:
-            self._detect(frame.samples)
+            self._detect(frame.samples, generation)
         elif state is VoiceState.LISTENING:
             self._record(frame.samples)
 
@@ -172,7 +172,7 @@ class VoiceListener:
         self._state.try_transition(VoiceState.LISTENING, VoiceState.IDLE)
         self._reset(self._state.generation)
 
-    def _detect(self, samples: Int16Frame) -> None:
+    def _detect(self, samples: Int16Frame, generation: int) -> None:
         self._buffer = np.concatenate((self._buffer, samples))
         frame_size = self._detector.frame_size
         while self._buffer.size >= frame_size:
@@ -180,11 +180,11 @@ class VoiceListener:
             self._buffer = self._buffer[frame_size:]
             score = self._detector.score(chunk)
             if score >= self._threshold:
-                self._trigger(score)
+                self._trigger(score, generation)
                 return
 
-    def _trigger(self, score: float) -> None:
-        if not self._state.try_begin_listening():
+    def _trigger(self, score: float, generation: int) -> None:
+        if not self._state.try_begin_listening(generation=generation):
             self._reset(self._state.generation)
             return
 

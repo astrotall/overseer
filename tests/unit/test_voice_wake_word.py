@@ -63,6 +63,20 @@ class RacingStateMachine(VoiceStateMachine):
         return observed
 
 
+class GateClosingDetector(FakeDetector):
+    def __init__(self, scores: list[float], gate: ConnectionGate) -> None:
+        super().__init__(scores)
+        self._gate = gate
+        self.raced = False
+
+    def score(self, frame: Int16Frame) -> float:
+        result = super().score(frame)
+        if not self.raced:
+            self.raced = True
+            self._gate.close()
+        return result
+
+
 class ClearingFrameQueue(FrameQueue):
     def __init__(self, on_cleared: Callable[[], None]) -> None:
         super().__init__()
@@ -386,6 +400,22 @@ def test_a_drop_does_not_undo_a_state_that_changed_under_the_listener() -> None:
     assert state.raced is True
     assert state.state is VoiceState.SPEAKING
     assert utterances == []
+
+
+def test_a_gate_that_shuts_while_the_frame_is_scored_still_swallows_the_wake_word() -> None:
+    state = VoiceStateMachine()
+    gate = ConnectionGate(state, opened=True)
+    detector = GateClosingDetector([0.9], gate)
+    listener, events, _ = make_listener(detector, state=state, gate=gate)
+    generation = state.generation
+
+    feed_now(listener, state)
+
+    assert detector.raced is True
+    assert gate.is_open is False
+    assert events == []
+    assert state.state is VoiceState.IDLE
+    assert state.generation == generation + 1
 
 
 def test_a_frame_captured_while_the_connection_was_down_loses_the_race_with_the_clear() -> None:
