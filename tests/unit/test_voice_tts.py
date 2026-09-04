@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+from apps.voice import config as voice_config
+from apps.voice.config import VoiceSettings
 from apps.voice.tts import (
     MAX_CHUNK_CHARS,
+    SileroTTS,
     Speech,
     is_speakable,
     split_for_synthesis,
@@ -106,3 +111,59 @@ def test_speech_reports_its_duration_from_the_sample_count() -> None:
     speech = Speech(samples=np.zeros(48_000, dtype=np.int16), samplerate=24_000)
 
     assert speech.duration_s == pytest.approx(2.0)
+
+
+class FakeTorchHub:
+    def __init__(self) -> None:
+        self.downloads: list[tuple[str, str]] = []
+
+    def download_url_to_file(self, url: str, path: str, progress: bool = True) -> None:
+        self.downloads.append((url, path))
+        Path(path).write_text(url, encoding="utf-8")
+
+
+class FakeTorch:
+    def __init__(self) -> None:
+        self.hub = FakeTorchHub()
+
+
+def make_downloader(torch: FakeTorch) -> SileroTTS:
+    engine = SileroTTS.__new__(SileroTTS)
+    engine._torch = torch
+    return engine
+
+
+def test_weights_cached_for_another_url_are_not_reused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(voice_config, "MODEL_CACHE_DIR", tmp_path)
+    first_url = "https://models.silero.ai/models/tts/ru/v1/model.pt"
+    second_url = "https://models.silero.ai/models/tts/ru/v2/model.pt"
+    torch = FakeTorch()
+    downloader = make_downloader(torch)
+
+    first = downloader._ensure_weights(
+        first_url, VoiceSettings(tts_model_url=first_url).tts_model_file
+    )
+    second = downloader._ensure_weights(
+        second_url, VoiceSettings(tts_model_url=second_url).tts_model_file
+    )
+
+    assert first != second
+    assert first.read_text(encoding="utf-8") == first_url
+    assert second.read_text(encoding="utf-8") == second_url
+    assert torch.hub.downloads == [(first_url, str(first)), (second_url, str(second))]
+
+
+def test_weights_already_cached_for_the_same_url_are_downloaded_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(voice_config, "MODEL_CACHE_DIR", tmp_path)
+    url = "https://models.silero.ai/models/tts/ru/v4_ru.pt"
+    torch = FakeTorch()
+    downloader = make_downloader(torch)
+    weights = VoiceSettings(tts_model_url=url).tts_model_file
+
+    assert downloader._ensure_weights(url, weights) == weights
+    assert downloader._ensure_weights(url, weights) == weights
+    assert torch.hub.downloads == [(url, str(weights))]

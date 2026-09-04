@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
+import time
+from typing import Any
 
 import numpy as np
 import pytest
@@ -10,10 +13,12 @@ from apps.voice.audio import Int16Frame
 from apps.voice.playback import (
     PlaybackError,
     PlaybackOutcome,
+    SoundDeviceSink,
     SpeechPlayer,
 )
 from apps.voice.state import VoiceState, VoiceStateMachine
 from apps.voice.tts import Speech
+from libs.core.exceptions import ConfigurationError
 
 SAMPLE_RATE = 24_000
 BLOCK = 4
@@ -29,6 +34,7 @@ class FakeSink:
         self.blocked = threading.Event()
         self.release = threading.Event()
         self.hold_from: int | None = None
+        self.hold_timeout = 2.0
 
     @property
     def samplerate(self) -> int:
@@ -47,7 +53,7 @@ class FakeSink:
         self.blocks.append(block)
         if self.hold_from is not None and len(self.blocks) >= self.hold_from:
             self.blocked.set()
-            self.release.wait(2.0)
+            self.release.wait(self.hold_timeout)
 
     @property
     def written(self) -> Int16Frame:
@@ -234,3 +240,130 @@ async def test_stopping_mid_speech_resolves_the_waiting_caller() -> None:
 async def test_a_non_positive_block_size_is_rejected() -> None:
     with pytest.raises(ValueError, match="block_samples must be positive"):
         SpeechPlayer(sink=FakeSink(), generation_provider=lambda: 0, block_samples=0)
+
+
+class FakePortAudioError(Exception):
+    pass
+
+
+class FakeOutputStream:
+    def __init__(self, *, start_fails: bool) -> None:
+        self._start_fails = start_fails
+        self.started = 0
+        self.closed = 0
+
+    def start(self) -> None:
+        self.started += 1
+        if self._start_fails:
+            raise FakePortAudioError("устройство занято")
+
+    def stop(self) -> None: ...
+
+    def close(self) -> None:
+        self.closed += 1
+
+    def write(self, block: Any) -> None: ...
+
+
+class FakeSoundDevice:
+    PortAudioError = FakePortAudioError
+
+    def __init__(self, *, start_fails: bool = False) -> None:
+        self._start_fails = start_fails
+        self.streams: list[FakeOutputStream] = []
+
+    def OutputStream(self, **kwargs: Any) -> FakeOutputStream:
+        stream = FakeOutputStream(start_fails=self._start_fails)
+        self.streams.append(stream)
+        return stream
+
+
+def use_fake_sounddevice(monkeypatch: pytest.MonkeyPatch, *, start_fails: bool) -> FakeSoundDevice:
+    fake = FakeSoundDevice(start_fails=start_fails)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    return fake
+
+
+def test_a_stream_that_fails_to_start_is_closed_before_the_error_is_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = use_fake_sounddevice(monkeypatch, start_fails=True)
+    sink = SoundDeviceSink(samplerate=SAMPLE_RATE)
+
+    with pytest.raises(ConfigurationError, match="Не удалось открыть вывод звука"):
+        sink.start()
+
+    assert len(fake.streams) == 1
+    assert fake.streams[0].closed == 1
+
+
+def test_a_stream_that_starts_is_not_closed_behind_the_sink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = use_fake_sounddevice(monkeypatch, start_fails=False)
+    sink = SoundDeviceSink(samplerate=SAMPLE_RATE)
+
+    sink.start()
+
+    assert fake.streams[0].started == 1
+    assert fake.streams[0].closed == 0
+
+    sink.stop()
+
+    assert fake.streams[0].closed == 1
+
+
+def wait_until_stopped(player: SpeechPlayer, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while player.running and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+async def test_a_sink_that_never_returns_does_not_leave_callers_waiting_forever() -> None:
+    sink = FakeSink()
+    sink.hold_from = 1
+    sink.hold_timeout = 5.0
+    player = make_player(sink, VoiceStateMachine())
+    player.start()
+
+    try:
+        playing = asyncio.create_task(player.play(speech(40)))
+        await asyncio.to_thread(sink.blocked.wait, 2.0)
+        queued = asyncio.create_task(player.play(speech(8)))
+        await asyncio.sleep(0.05)
+
+        await asyncio.to_thread(player.stop, 0.1)
+
+        assert await asyncio.wait_for(playing, timeout=2.0) is PlaybackOutcome.INTERRUPTED
+        assert await asyncio.wait_for(queued, timeout=2.0) is PlaybackOutcome.INTERRUPTED
+    finally:
+        sink.release.set()
+        wait_until_stopped(player)
+
+
+async def test_a_thread_that_wakes_up_after_the_timeout_does_not_resolve_twice() -> None:
+    sink = FakeSink()
+    sink.hold_from = 1
+    sink.hold_timeout = 5.0
+    player = make_player(sink, VoiceStateMachine())
+    player.start()
+
+    loop = asyncio.get_running_loop()
+    failures: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, context: failures.append(context))
+
+    try:
+        playing = asyncio.create_task(player.play(speech(40)))
+        await asyncio.to_thread(sink.blocked.wait, 2.0)
+        await asyncio.to_thread(player.stop, 0.1)
+
+        assert await asyncio.wait_for(playing, timeout=2.0) is PlaybackOutcome.INTERRUPTED
+
+        sink.release.set()
+        await asyncio.to_thread(wait_until_stopped, player)
+        await asyncio.sleep(0.1)
+
+        assert failures == []
+    finally:
+        loop.set_exception_handler(None)
+        sink.release.set()

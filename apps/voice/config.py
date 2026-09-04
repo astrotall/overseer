@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from hashlib import sha256
 from pathlib import Path
 from typing import Final, Self
 from urllib.parse import urlparse
@@ -11,6 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parents[2]
 MODEL_CACHE_DIR: Final[Path] = Path.home() / ".cache" / "overseer" / "tts"
 FALLBACK_MODEL_FILE: Final[str] = "silero_tts.pt"
+URL_DIGEST_CHARS: Final[int] = 12
 TTS_SAMPLE_RATES: Final[frozenset[int]] = frozenset({8_000, 24_000, 48_000})
 
 
@@ -113,7 +115,8 @@ class VoiceSettings(BaseSettings):
         default=None,
         description=(
             "Путь к уже скачанной модели Silero (.pt). Пусто — файл кладётся в "
-            f"{MODEL_CACHE_DIR} при первом запуске"
+            f"{MODEL_CACHE_DIR}/<хэш URL> при первом запуске: разные URL с одинаковым "
+            "именем файла не должны делить один кэш"
         ),
     )
     tts_voice: str = Field(
@@ -149,7 +152,8 @@ class VoiceSettings(BaseSettings):
             return self.tts_model_path
 
         name = Path(urlparse(self.tts_model_url).path).name or FALLBACK_MODEL_FILE
-        return MODEL_CACHE_DIR / name
+        digest = sha256(self.tts_model_url.encode("utf-8")).hexdigest()[:URL_DIGEST_CHARS]
+        return MODEL_CACHE_DIR / digest / name
 
     @field_validator("tts_sample_rate")
     @classmethod

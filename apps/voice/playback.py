@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import queue
 import threading
 from collections.abc import Callable
@@ -72,6 +73,8 @@ class SpeechPlayer:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lifecycle = threading.Lock()
+        self._pending: list[PlaybackItem] = []
+        self._pending_lock = threading.Lock()
 
     @property
     def running(self) -> bool:
@@ -103,12 +106,13 @@ class SpeechPlayer:
                     logger.warning(
                         "voice.playback_stop_timed_out", thread=thread.name, timeout=timeout
                     )
+                    self._abandon(PlaybackOutcome.INTERRUPTED)
                     return
 
                 self._thread = None
 
             self._sink.stop()
-            self._drain(PlaybackOutcome.INTERRUPTED)
+            self._abandon(PlaybackOutcome.INTERRUPTED)
 
     async def play(self, speech: Speech) -> PlaybackOutcome:
         if speech.samplerate != self._sink.samplerate:
@@ -131,9 +135,13 @@ class SpeechPlayer:
             if self._thread is None or not self._thread.is_alive():
                 raise PlaybackError("playback is not running: start() has not been called")
 
+            with self._pending_lock:
+                self._pending.append(item)
+
             try:
                 self._queue.put_nowait(item)
             except queue.Full:
+                self._forget(item)
                 logger.warning("voice.playback_dropped_queue_full", generation=item.generation)
                 return PlaybackOutcome.DROPPED
 
@@ -150,13 +158,16 @@ class SpeechPlayer:
 
     def _play_item(self, item: PlaybackItem) -> None:
         try:
-            outcome = self._render(item)
-        except Exception as exc:
-            logger.exception("voice.playback_failed", generation=item.generation)
-            item.resolve(exc)
-            return
+            result: PlaybackOutcome | BaseException
+            try:
+                result = self._render(item)
+            except Exception as exc:
+                logger.exception("voice.playback_failed", generation=item.generation)
+                result = exc
 
-        item.resolve(outcome)
+            item.resolve(result)
+        finally:
+            self._forget(item)
 
     def _render(self, item: PlaybackItem) -> PlaybackOutcome:
         current = self._generation_provider()
@@ -183,14 +194,26 @@ class SpeechPlayer:
 
         return PlaybackOutcome.PLAYED
 
-    def _drain(self, outcome: PlaybackOutcome) -> None:
+    def _abandon(self, outcome: PlaybackOutcome) -> None:
         while True:
             try:
-                item = self._queue.get_nowait()
+                self._queue.get_nowait()
             except queue.Empty:
-                return
+                break
 
+        with self._pending_lock:
+            outstanding = tuple(self._pending)
+            self._pending.clear()
+
+        for item in outstanding:
             item.resolve(outcome)
+
+    def _forget(self, item: PlaybackItem) -> None:
+        with self._pending_lock:
+            for index, pending in enumerate(self._pending):
+                if pending is item:
+                    del self._pending[index]
+                    return
 
 
 def _threadsafe_resolver(
@@ -241,6 +264,7 @@ class SoundDeviceSink:
         if self._stream is not None:
             return
 
+        stream = None
         try:
             stream = self._sd.OutputStream(
                 samplerate=self._samplerate,
@@ -251,6 +275,9 @@ class SoundDeviceSink:
             )
             stream.start()
         except self._sd.PortAudioError as exc:
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.close()
             raise ConfigurationError(
                 f"Не удалось открыть вывод звука "
                 f"({self._device or 'системный по умолчанию'}) в формате "
