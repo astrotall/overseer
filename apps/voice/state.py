@@ -43,18 +43,31 @@ class VoiceStateMachine:
             self._state = state
             self._generation += 1
 
-    def try_begin_listening(self) -> bool:
+    def try_transition(self, expected: VoiceState, target: VoiceState) -> bool:
         with self._lock:
-            if self._state is not VoiceState.IDLE:
+            if self._state is not expected or target is expected:
                 return False
 
-            self._state = VoiceState.LISTENING
+            self._state = target
+            self._generation += 1
+            return True
+
+    def try_begin_listening(self) -> bool:
+        return self.try_transition(VoiceState.IDLE, VoiceState.LISTENING)
+
+    def invalidate_input(self) -> bool:
+        with self._lock:
+            if self._state is VoiceState.SPEAKING:
+                return False
+
             self._generation += 1
             return True
 
 
 class ConnectionGate:
-    def __init__(self, *, opened: bool = False) -> None:
+    def __init__(self, state: VoiceStateMachine | None = None, *, opened: bool = False) -> None:
+        self._state = state
+        self._lock = threading.Lock()
         self._opened = threading.Event()
         if opened:
             self._opened.set()
@@ -64,7 +77,20 @@ class ConnectionGate:
         return self._opened.is_set()
 
     def open(self) -> None:
-        self._opened.set()
+        self._switch(opened=True)
 
     def close(self) -> None:
-        self._opened.clear()
+        self._switch(opened=False)
+
+    def _switch(self, *, opened: bool) -> None:
+        with self._lock:
+            if opened is self._opened.is_set():
+                return
+
+            if self._state is not None:
+                self._state.invalidate_input()
+
+            if opened:
+                self._opened.set()
+            else:
+                self._opened.clear()

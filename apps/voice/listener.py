@@ -132,11 +132,11 @@ class VoiceListener:
 
     def feed(self, frame: QueuedFrame) -> None:
         state, generation = self._state.snapshot()
+        if not self._gate_open(state):
+            return
         if generation != self._generation:
             self._reset(generation)
         if frame.generation != generation:
-            return
-        if not self._gate_open(state):
             return
 
         if state is VoiceState.IDLE:
@@ -169,8 +169,7 @@ class VoiceListener:
 
     def _suspend(self, state: VoiceState) -> None:
         logger.info("voice.listener_suspended", state=state.value)
-        if state is VoiceState.LISTENING:
-            self._state.set(VoiceState.IDLE)
+        self._state.try_transition(VoiceState.LISTENING, VoiceState.IDLE)
         self._reset(self._state.generation)
 
     def _detect(self, samples: Int16Frame) -> None:

@@ -95,7 +95,7 @@ class VoiceWSClient:
         self._transcripts = transcripts
         self._speaker = speaker
         self._state = state
-        self._gate = gate if gate is not None else ConnectionGate()
+        self._gate = gate if gate is not None else ConnectionGate(state)
         self._connector = connector
         self._reconnect_initial_s = reconnect_initial_s
         self._reconnect_max_s = reconnect_max_s
