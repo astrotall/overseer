@@ -70,3 +70,27 @@ def test_empty_optional_keys_from_env_file_mean_unset(
 
     assert settings.wake_word_model_path is None
     assert settings.input_device is None
+
+
+@pytest.mark.parametrize("max_utterance_s", [3.0, 1.5])
+def test_the_utterance_ceiling_must_leave_room_for_the_start_timeout(
+    max_utterance_s: float,
+) -> None:
+    with pytest.raises(ValidationError, match="vad_max_utterance_s"):
+        VoiceSettings(vad_start_timeout_s=3.0, vad_max_utterance_s=max_utterance_s)
+
+
+def test_an_impossible_vad_pair_is_rejected_before_the_endpointer_sees_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VOICE_VAD_START_TIMEOUT_S", "10")
+    monkeypatch.setenv("VOICE_VAD_MAX_UTTERANCE_S", "10")
+
+    with pytest.raises(ValidationError, match="vad_max_utterance_s"):
+        VoiceSettings()
+
+
+def test_a_workable_vad_pair_passes() -> None:
+    settings = VoiceSettings(vad_start_timeout_s=3.0, vad_max_utterance_s=3.5)
+
+    assert settings.vad_max_utterance_s == pytest.approx(3.5)

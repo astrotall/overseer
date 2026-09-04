@@ -5,12 +5,13 @@ import asyncio
 import numpy as np
 import pytest
 
+from apps.voice import pipeline as pipeline_module
 from apps.voice.audio import Int16Frame
 from apps.voice.cues import CueKind
 from apps.voice.listener import Utterance
 from apps.voice.pipeline import TRANSCRIPT_QUEUE_MAXSIZE, Transcript, VoicePipeline
 from apps.voice.state import VoiceState, VoiceStateMachine
-from apps.voice.stt import Transcription
+from apps.voice.stt import Segment, Transcription
 from apps.voice.vad import EndpointOutcome
 
 MAX_MESSAGE_LENGTH = 8000
@@ -50,8 +51,7 @@ def transcription(
     return Transcription(
         text=text,
         language="ru",
-        no_speech_prob=no_speech_prob,
-        avg_logprob=avg_logprob,
+        segments=(Segment(text=text, no_speech_prob=no_speech_prob, avg_logprob=avg_logprob),),
     )
 
 
@@ -266,3 +266,76 @@ async def test_the_log_cue_is_a_silent_stand_in() -> None:
     from apps.voice.cues import LogCue
 
     await LogCue().play(CueKind.NOT_UNDERSTOOD)
+
+
+class RecordingLogger:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, dict[str, object]]] = []
+
+    def info(self, event: str, **kwargs: object) -> None:
+        self.records.append((event, kwargs))
+
+    def debug(self, event: str, **kwargs: object) -> None:
+        self.records.append((event, kwargs))
+
+    def warning(self, event: str, **kwargs: object) -> None:
+        self.records.append((event, kwargs))
+
+    def exception(self, event: str, **kwargs: object) -> None:
+        self.records.append((event, kwargs))
+
+
+@pytest.fixture
+def recorded_logs(monkeypatch: pytest.MonkeyPatch) -> RecordingLogger:
+    recorder = RecordingLogger()
+    monkeypatch.setattr(pipeline_module, "logger", recorder)
+    return recorder
+
+
+def logged(recorder: RecordingLogger, event: str) -> dict[str, object]:
+    return next(kwargs for name, kwargs in recorder.records if name == event)
+
+
+SECRET = "переведи Ивану сто тысяч на счёт сорок восемь семнадцать"
+
+
+async def test_a_published_transcript_is_logged_without_its_text(
+    recorded_logs: RecordingLogger,
+) -> None:
+    stt = FakeSTT(transcription(SECRET))
+    pipeline, _, _, _ = make_pipeline(stt)
+
+    await pipeline.handle(utterance())
+
+    ready = logged(recorded_logs, "voice.transcript_ready")
+    assert ready["chars"] == len(SECRET)
+    assert ready["language"] == "ru"
+    assert SECRET not in str(recorded_logs.records)
+
+
+async def test_a_rejected_transcript_is_logged_without_its_text(
+    recorded_logs: RecordingLogger,
+) -> None:
+    stt = FakeSTT(transcription(SECRET, no_speech_prob=0.95))
+    pipeline, _, _, _ = make_pipeline(stt)
+
+    await pipeline.handle(utterance())
+
+    rejected = logged(recorded_logs, "voice.transcript_rejected")
+    assert rejected["chars"] == len(SECRET)
+    assert rejected["segments"] == 0
+    assert rejected["trimmed"] == 1
+    assert SECRET not in str(recorded_logs.records)
+
+
+async def test_a_transcript_rejected_by_the_envelope_is_logged_without_its_text(
+    recorded_logs: RecordingLogger,
+) -> None:
+    stt = FakeSTT(transcription(SECRET * 400))
+    pipeline, _, _, _ = make_pipeline(stt)
+
+    await pipeline.handle(utterance())
+
+    invalid = logged(recorded_logs, "voice.transcript_invalid")
+    assert invalid["errors"] == ["string_too_long"]
+    assert SECRET not in str(recorded_logs.records)

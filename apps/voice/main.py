@@ -37,7 +37,8 @@ async def drain_transcripts(transcripts: asyncio.Queue[Transcript]) -> None:
             "voice.transcript",
             epoch=transcript.epoch,
             language=transcript.language,
-            text=transcript.text,
+            duration_s=round(transcript.duration_s, 2),
+            chars=len(transcript.text),
         )
 
 

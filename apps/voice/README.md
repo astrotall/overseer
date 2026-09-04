@@ -172,13 +172,18 @@ uv run python -m apps.voice.main
 
 `epoch` пока всегда `0`: он приезжает от `ws_client.py` (OVE-48), а до тех пор
 `listener.py` и `pipeline.py` получают заглушку `unset_epoch`. После срабатывания скажите
-запрос — распознанный текст уйдёт в лог строкой `voice.transcript`:
+запрос — факт распознавания уйдёт в лог строкой `voice.transcript`:
 
 ```text
 2026-09-04 17:20:44 [info] voice.wake_word_detected  phrase='hey jarvis' score=0.98 epoch=0
 2026-09-04 17:20:47 [info] voice.utterance_captured  duration_s=2.88 outcome=speech truncated=False
-2026-09-04 17:20:48 [info] voice.transcript          text='Какая погода в Москве?' language=ru
+2026-09-04 17:20:48 [info] voice.transcript          epoch=0 language=ru duration_s=2.88 chars=22
 ```
+
+**Самого текста в логах нет и не будет** — ни здесь, ни в `voice.transcript_rejected`:
+расшифровка речи пользователя может нести что угодно, а логи живут дольше и под более
+слабым доступом, чем база. В лог идут только метаданные: язык, длительность, число
+символов и метрики распознавания.
 
 Дальше этой строки текст пока не идёт: отправку в `/ws/chat` приносит OVE-48.
 

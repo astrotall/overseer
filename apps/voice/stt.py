@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
+from statistics import median
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import numpy as np
@@ -27,9 +29,24 @@ LETTER_OR_DIGIT: Final[re.Pattern[str]] = re.compile(r"[^\W_]", re.UNICODE)
 
 
 @dataclass(frozen=True, slots=True)
+class Segment:
+    text: str
+    no_speech_prob: float
+    avg_logprob: float
+
+
+@dataclass(frozen=True, slots=True)
 class Transcription:
     text: str
     language: str | None
+    segments: tuple[Segment, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptQuality:
+    segments: int
+    speech_segments: int
+    trimmed: int
     no_speech_prob: float
     avg_logprob: float
 
@@ -46,16 +63,53 @@ def normalize_transcript(text: str) -> str:
     return " ".join(text.split())
 
 
+def is_speech_like(segment: Segment) -> bool:
+    return (
+        segment.no_speech_prob <= NO_SPEECH_PROB_LIMIT and segment.avg_logprob >= AVG_LOGPROB_LIMIT
+    )
+
+
+def without_trailing_noise(segments: Sequence[Segment]) -> tuple[Segment, ...]:
+    end = len(segments)
+    while end > 0 and not is_speech_like(segments[end - 1]):
+        end -= 1
+
+    return tuple(segments[:end])
+
+
+def transcript_quality(transcription: Transcription) -> TranscriptQuality:
+    body = without_trailing_noise(transcription.segments)
+    trimmed = len(transcription.segments) - len(body)
+    if not body:
+        return TranscriptQuality(
+            segments=0,
+            speech_segments=0,
+            trimmed=trimmed,
+            no_speech_prob=1.0,
+            avg_logprob=0.0,
+        )
+
+    return TranscriptQuality(
+        segments=len(body),
+        speech_segments=sum(1 for segment in body if is_speech_like(segment)),
+        trimmed=trimmed,
+        no_speech_prob=median(segment.no_speech_prob for segment in body),
+        avg_logprob=median(segment.avg_logprob for segment in body),
+    )
+
+
 def is_meaningful(transcription: Transcription) -> bool:
     text = normalize_transcript(transcription.text)
     if len(text) < MIN_TRANSCRIPT_CHARS:
         return False
     if LETTER_OR_DIGIT.search(text) is None:
         return False
-    if transcription.no_speech_prob > NO_SPEECH_PROB_LIMIT:
+
+    quality = transcript_quality(transcription)
+    if quality.segments == 0:
         return False
 
-    return transcription.avg_logprob >= AVG_LOGPROB_LIMIT
+    return quality.speech_segments * 2 >= quality.segments
 
 
 class FasterWhisperSTT:
@@ -109,17 +163,17 @@ class FasterWhisperSTT:
             condition_on_previous_text=False,
         )
 
-        texts: list[str] = []
-        no_speech_probs: list[float] = []
-        avg_logprobs: list[float] = []
-        for segment in segments:
-            texts.append(segment.text)
-            no_speech_probs.append(float(segment.no_speech_prob))
-            avg_logprobs.append(float(segment.avg_logprob))
+        recognised = tuple(
+            Segment(
+                text=segment.text,
+                no_speech_prob=float(segment.no_speech_prob),
+                avg_logprob=float(segment.avg_logprob),
+            )
+            for segment in segments
+        )
 
         return Transcription(
-            text=normalize_transcript("".join(texts)),
+            text=normalize_transcript("".join(segment.text for segment in recognised)),
             language=info.language,
-            no_speech_prob=min(no_speech_probs, default=1.0),
-            avg_logprob=max(avg_logprobs, default=0.0),
+            segments=recognised,
         )

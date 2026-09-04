@@ -7,11 +7,29 @@ from apps.voice.config import VoiceSettings
 from apps.voice.stt import (
     AVG_LOGPROB_LIMIT,
     NO_SPEECH_PROB_LIMIT,
+    Segment,
     Transcription,
     is_meaningful,
     normalize_transcript,
     to_float32,
+    transcript_quality,
 )
+
+
+def speech(text: str = "какая погода в Москве") -> Segment:
+    return Segment(text=text, no_speech_prob=0.05, avg_logprob=-0.2)
+
+
+def noise(text: str = " Продолжение следует...") -> Segment:
+    return Segment(text=text, no_speech_prob=0.95, avg_logprob=-1.8)
+
+
+def from_segments(*segments: Segment, language: str | None = "ru") -> Transcription:
+    return Transcription(
+        text="".join(segment.text for segment in segments).strip(),
+        language=language,
+        segments=segments,
+    )
 
 
 def transcription(
@@ -24,8 +42,7 @@ def transcription(
     return Transcription(
         text=text,
         language=language,
-        no_speech_prob=no_speech_prob,
-        avg_logprob=avg_logprob,
+        segments=(Segment(text=text, no_speech_prob=no_speech_prob, avg_logprob=avg_logprob),),
     )
 
 
@@ -107,3 +124,66 @@ def test_a_blank_language_means_autodetect(raw: str) -> None:
 
 def test_the_language_is_normalised_to_lower_case() -> None:
     assert VoiceSettings(stt_language=" RU ").stt_language == "ru"
+
+
+def test_a_quiet_tail_does_not_sink_a_good_long_utterance() -> None:
+    utterance = from_segments(
+        speech("собери отчёт за август"),
+        speech(" и положи его в Word"),
+        speech(" а потом отправь почтой"),
+        noise(),
+    )
+
+    assert is_meaningful(utterance) is True
+
+
+def test_one_clean_segment_inside_noise_does_not_carry_the_whole_utterance() -> None:
+    utterance = from_segments(
+        noise(" Субтитры сделал DimaTorzok"),
+        noise(" Продолжение следует..."),
+        speech(" спасибо за просмотр"),
+        noise(" ..."),
+        noise(" Продолжение следует..."),
+    )
+
+    assert is_meaningful(utterance) is False
+
+
+def test_a_clean_segment_at_the_very_end_of_noise_does_not_save_it_either() -> None:
+    utterance = from_segments(noise(), noise(), speech(" спасибо за просмотр"))
+
+    assert is_meaningful(utterance) is False
+
+
+def test_a_transcript_of_nothing_but_noise_is_rejected() -> None:
+    assert is_meaningful(from_segments(noise(), noise())) is False
+
+
+def test_half_the_segments_being_speech_is_enough() -> None:
+    assert is_meaningful(from_segments(noise(), speech(" включи музыку"))) is True
+
+
+def test_quality_counts_the_trailing_noise_it_ignored() -> None:
+    quality = transcript_quality(from_segments(speech(), noise(), noise()))
+
+    assert quality.segments == 1
+    assert quality.speech_segments == 1
+    assert quality.trimmed == 2
+
+
+def test_quality_reports_the_median_of_the_segments_it_kept() -> None:
+    quality = transcript_quality(from_segments(noise(), speech(), speech(), noise()))
+
+    assert quality.segments == 3
+    assert quality.speech_segments == 2
+    assert quality.trimmed == 1
+    assert quality.no_speech_prob == pytest.approx(0.05)
+    assert quality.avg_logprob == pytest.approx(-0.2)
+
+
+def test_quality_of_an_utterance_without_segments_is_not_speech() -> None:
+    quality = transcript_quality(from_segments())
+
+    assert quality.segments == 0
+    assert quality.speech_segments == 0
+    assert is_meaningful(Transcription(text="привет", language="ru", segments=())) is False

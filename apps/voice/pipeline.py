@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from apps.voice.cues import Cue, CueKind
 from apps.voice.listener import EpochProvider, Utterance, unset_epoch
 from apps.voice.state import VoiceState, VoiceStateMachine
-from apps.voice.stt import SpeechToText, is_meaningful
+from apps.voice.stt import SpeechToText, is_meaningful, transcript_quality
 from apps.voice.vad import EndpointOutcome
 from libs.core.logging import get_logger
 from libs.schemas.chat import SendMessageRequest
@@ -72,12 +72,17 @@ class VoicePipeline:
             return None
 
         if not is_meaningful(transcription):
+            quality = transcript_quality(transcription)
             logger.info(
                 "voice.transcript_rejected",
                 epoch=utterance.epoch,
-                text=transcription.text,
-                no_speech_prob=round(transcription.no_speech_prob, 3),
-                avg_logprob=round(transcription.avg_logprob, 3),
+                language=transcription.language,
+                chars=len(transcription.text),
+                segments=quality.segments,
+                speech_segments=quality.speech_segments,
+                trimmed=quality.trimmed,
+                no_speech_prob=round(quality.no_speech_prob, 3),
+                avg_logprob=round(quality.avg_logprob, 3),
             )
             await self._notify(CueKind.NOT_UNDERSTOOD)
             return None
@@ -85,7 +90,12 @@ class VoicePipeline:
         try:
             content = SendMessageRequest(content=transcription.text).content
         except ValidationError as exc:
-            logger.info("voice.transcript_invalid", epoch=utterance.epoch, error=str(exc))
+            logger.info(
+                "voice.transcript_invalid",
+                epoch=utterance.epoch,
+                chars=len(transcription.text),
+                errors=[error["type"] for error in exc.errors()],
+            )
             await self._notify(CueKind.NOT_UNDERSTOOD)
             return None
 

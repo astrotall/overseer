@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Self
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -114,6 +115,17 @@ class VoiceSettings(BaseSettings):
             return value.strip() or None
 
         return value
+
+    @model_validator(mode="after")
+    def _check_vad_limits(self) -> Self:
+        if self.vad_max_utterance_s <= self.vad_start_timeout_s:
+            raise ValueError(
+                "vad_max_utterance_s должен превышать vad_start_timeout_s: потолок длины "
+                f"реплики {self.vad_max_utterance_s} с не даёт дождаться начала речи за "
+                f"{self.vad_start_timeout_s} с"
+            )
+
+        return self
 
 
 @lru_cache(maxsize=1)
