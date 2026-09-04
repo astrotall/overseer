@@ -53,12 +53,14 @@ class VoicePipeline:
             await self.handle(utterance)
 
     async def handle(self, utterance: Utterance) -> None:
+        published = False
         try:
             transcript = await self._transcribe(utterance)
             if transcript is not None:
-                self._publish(transcript)
+                published = self._publish(transcript)
         finally:
-            self._state.set(VoiceState.IDLE)
+            if not published:
+                self._state.set(VoiceState.IDLE)
 
     async def _transcribe(self, utterance: Utterance) -> Transcript | None:
         if utterance.outcome is EndpointOutcome.NO_SPEECH:
@@ -108,7 +110,7 @@ class VoicePipeline:
             duration_s=utterance.duration_s,
         )
 
-    def _publish(self, transcript: Transcript) -> None:
+    def _publish(self, transcript: Transcript) -> bool:
         current = self._epoch_provider()
         if transcript.epoch != current:
             logger.debug(
@@ -116,13 +118,13 @@ class VoicePipeline:
                 epoch=transcript.epoch,
                 current=current,
             )
-            return
+            return False
 
         try:
             self._transcripts.put_nowait(transcript)
         except asyncio.QueueFull:
             logger.warning("voice.transcript_dropped_queue_full", epoch=transcript.epoch)
-            return
+            return False
 
         logger.info(
             "voice.transcript_ready",
@@ -131,6 +133,7 @@ class VoicePipeline:
             duration_s=round(transcript.duration_s, 2),
             chars=len(transcript.text),
         )
+        return True
 
     async def _notify(self, kind: CueKind) -> None:
         self._state.set(VoiceState.SPEAKING)

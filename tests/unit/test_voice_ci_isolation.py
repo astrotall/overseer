@@ -18,6 +18,7 @@ CI_SAFE_MODULES = [
     "apps.voice.pipeline",
     "apps.voice.tts",
     "apps.voice.playback",
+    "apps.voice.ws_client",
 ]
 VOICE_ONLY_PACKAGES = (
     "sounddevice",

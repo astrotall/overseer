@@ -316,13 +316,12 @@ job; we do not merge a red CI.
 - ⏳ LLM clients — interfaces only, generation is not implemented;
 - ⏳ the tool registry and tool calling — not implemented;
 - ⏳ `apps/executor` (COM/Playwright) — an empty package with a README;
-- ⏳ `apps/voice` — both ends work, the middle is missing (OVE-45 … OVE-47): capture
-  through `sounddevice`, openWakeWord detection and utterance capture in a worker thread,
-  energy-based endpointing, transcription with `faster-whisper`, and a filter that refuses
-  to forward an empty or low-confidence transcript; on the other end, `speak(text)`
-  synthesizes any string with Silero TTS and plays it back while the wake word is gated
-  off. Installed separately with `uv sync --group voice`. The recognized text still stops
-  in an outgoing queue: the `/ws/chat` client that joins the two ends lands in OVE-48;
+- ✅ `apps/voice` — the loop is closed (OVE-45 … OVE-48): capture through `sounddevice`,
+  openWakeWord detection and utterance capture in a worker thread, energy-based
+  endpointing, transcription with `faster-whisper`, a filter that refuses to forward an
+  empty or low-confidence transcript, and a `/ws/chat` client that sends the text, speaks
+  the reply with Silero TTS and reconnects on its own — the wake word stays gated off
+  until the answer has been played. Installed separately with `uv sync --group voice`;
 - ✅ test infrastructure: pytest + pytest-asyncio + pytest-cov, fixtures
   (`db_session`, `async_client`), the `GET /health` smoke test;
 - ✅ ruff, mypy, pre-commit and CI on GitHub Actions;

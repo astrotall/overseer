@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
@@ -144,6 +145,30 @@ class VoiceSettings(BaseSettings):
             "по умолчанию"
         ),
     )
+    ws_url: str = Field(
+        default="ws://localhost:8000/ws/chat",
+        description=(
+            "Адрес /ws/chat: тот же конверт, что у любого другого клиента. Локальная "
+            "разработка целится в apps/api на API_HOST/API_PORT"
+        ),
+    )
+    conversation_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Диалог, в который пишет голосовой клиент. Пусто — сервер отдаёт диалог по "
+            "умолчанию, он стабилен между реконнектами"
+        ),
+    )
+    ws_reconnect_initial_s: float = Field(
+        default=1.0,
+        gt=0.0,
+        description="Первая пауза перед переподключением; дальше удваивается",
+    )
+    ws_reconnect_max_s: float = Field(
+        default=30.0,
+        gt=0.0,
+        description="Потолок паузы между попытками переподключения",
+    )
     log_level: str = "INFO"
 
     @property
@@ -176,7 +201,12 @@ class VoiceSettings(BaseSettings):
         return value
 
     @field_validator(
-        "wake_word_model_path", "input_device", "tts_model_path", "output_device", mode="before"
+        "wake_word_model_path",
+        "input_device",
+        "tts_model_path",
+        "output_device",
+        "conversation_id",
+        mode="before",
     )
     @classmethod
     def _empty_string_means_unset(cls, value: object) -> object:
@@ -184,6 +214,17 @@ class VoiceSettings(BaseSettings):
             return value.strip() or None
 
         return value
+
+    @model_validator(mode="after")
+    def _check_reconnect_limits(self) -> Self:
+        if self.ws_reconnect_max_s < self.ws_reconnect_initial_s:
+            raise ValueError(
+                "ws_reconnect_max_s не должен быть меньше ws_reconnect_initial_s: потолок "
+                f"паузы {self.ws_reconnect_max_s} с ниже первой паузы "
+                f"{self.ws_reconnect_initial_s} с"
+            )
+
+        return self
 
     @model_validator(mode="after")
     def _check_vad_limits(self) -> Self:

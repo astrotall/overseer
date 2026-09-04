@@ -127,7 +127,7 @@ async def test_pipeline_publishes_the_recognised_text() -> None:
     assert transcript.language == "ru"
     assert transcript.epoch == 0
     assert cue.played == []
-    assert state.state is VoiceState.IDLE
+    assert state.state is VoiceState.THINKING
 
 
 async def test_pipeline_never_sends_a_silent_utterance_to_the_model() -> None:
@@ -217,13 +217,23 @@ async def test_pipeline_keeps_a_transcript_whose_epoch_still_matches() -> None:
 
 async def test_pipeline_drops_a_transcript_when_nobody_drained_the_queue() -> None:
     stt = FakeSTT(transcription("первая"), transcription("вторая"))
-    pipeline, transcripts, _, _ = make_pipeline(stt)
+    pipeline, transcripts, _, state = make_pipeline(stt)
 
     await pipeline.handle(utterance())
     await pipeline.handle(utterance())
 
     assert transcripts.get_nowait().text == "первая"
     assert transcripts.empty()
+    assert state.state is VoiceState.IDLE
+
+
+async def test_a_published_transcript_leaves_the_turn_with_the_ws_client() -> None:
+    stt = FakeSTT(transcription("удали черновик"))
+    pipeline, _, _, state = make_pipeline(stt)
+
+    await pipeline.handle(utterance())
+
+    assert state.state is VoiceState.THINKING
 
 
 async def test_pipeline_run_consumes_utterances_until_cancelled() -> None:
