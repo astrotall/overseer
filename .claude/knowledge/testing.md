@@ -9,7 +9,9 @@
 - `tests/unit/` — юнит-тесты бизнес-логики: конфиг, LLM-клиенты и фабрика, контракт
   `libs/llm/base.py`, ORM-модель `Message`, системный промпт, а по `apps/voice` — конфиг,
   wake word и листенер, эндпоинтинг (`vad.py`), фильтры транскрипта (`stt.py`),
-  оркестрация (`pipeline.py`) и изоляция от CI (`test_voice_ci_isolation.py`);
+  оркестрация (`pipeline.py`), нарезка текста под синтез (`tts.py`), воспроизведение через
+  фейковый `AudioSink` (`playback.py`), переходы состояния на озвучке
+  (`test_voice_speaker.py`) и изоляция от CI (`test_voice_ci_isolation.py`);
 - секции `[tool.pytest.ini_options]` и `[tool.coverage.*]` в `pyproject.toml`;
 - `.pre-commit-config.yaml` — хуки на трёх стадиях (`pre-commit`, `commit-msg`, `pre-push`);
 - `.github/workflows/ci.yml` — CI на GitHub Actions.
@@ -22,20 +24,23 @@ Dev-зависимости из `pyproject.toml` (группа `dev`): `pytest>=
 `pytest-cov>=6.0`, `httpx>=0.27`, `ruff>=0.8`, `mypy>=1.13`. Пакетный менеджер — `uv`,
 всё запускается через `uv run`.
 
-Отдельно живёт группа `voice` (`openwakeword`, `sounddevice`, `faster-whisper`): она
-ставится только на машине, где реально слушают микрофон, — `uv sync --group voice`. Ни CI,
-ни образы `api` и `worker` её не ставят, поэтому тесты не имеют права импортировать
-`apps/voice/capture.py`, `apps/voice/playback.py` и `apps/voice/main.py` (там
-`sounddevice`) и создавать `OpenWakeWordDetector`, `FasterWhisperSTT` или `BeepCue` — эти
-три класса импортируют свой движок лениво, внутри `__init__`. Всё остальное в
-`apps/voice` — `audio.py`, `state.py`, `listener.py`, `config.py`, `vad.py`, `pipeline.py`
-и порты `WakeWordDetector` / `SpeechToText` / `Cue` — импортируется без звуковой карты и
-покрывается юнит-тестами через фейки.
+Отдельно живёт группа `voice` (`openwakeword`, `sounddevice`, `faster-whisper`, `torch`):
+она ставится только на машине, где реально слушают микрофон и говорят в динамик, —
+`uv sync --group voice`. Ни CI, ни образы `api` и `worker` её не ставят, поэтому тесты не
+имеют права импортировать `apps/voice/capture.py` и `apps/voice/main.py` (там `sounddevice`
+на верхнем уровне) и создавать `OpenWakeWordDetector`, `FasterWhisperSTT`, `BeepCue`,
+`SileroTTS` или `SoundDeviceSink` — эти пять классов импортируют свой движок лениво, внутри
+`__init__`. Всё остальное в `apps/voice` — `audio.py`, `state.py`, `listener.py`,
+`config.py`, `vad.py`, `pipeline.py`, `tts.py`, `playback.py` и порты `WakeWordDetector` /
+`SpeechToText` / `Cue` / `TextToSpeech` / `AudioSink` — импортируется без звуковой карты и
+покрывается юнит-тестами через фейки. `playback.py` в этом списке новичок: до OVE-47 он был
+не написан, а в задел OVE-44 попал как модуль с `sounddevice` на верхнем уровне; порт
+`AudioSink` сделал его CI-safe, и не-CI-safe остался один `capture.py`.
 
 Это правило не на честном слове: `tests/unit/test_voice_ci_isolation.py` поднимает
 подпроцесс с блокирующим `sys.meta_path`-финдером и убеждается, что каждый CI-safe модуль
 `apps/voice` импортируется, ни разу не тронув `sounddevice`, `openwakeword`,
-`faster_whisper` или `ctranslate2`. Добавили в такой модуль импорт движка на верхнем
+`faster_whisper`, `ctranslate2` или `torch`. Добавили в такой модуль импорт движка на верхнем
 уровне — тест покраснеет здесь, а не в CI на `ubuntu-latest`.
 
 ## Команды

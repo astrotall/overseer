@@ -8,8 +8,10 @@ from pydantic import ValidationError
 
 from apps.voice.cues import Cue, CueKind
 from apps.voice.listener import EpochProvider, Utterance, unset_epoch
+from apps.voice.playback import PlaybackOutcome, SpeechPlayer
 from apps.voice.state import VoiceState, VoiceStateMachine
 from apps.voice.stt import SpeechToText, is_meaningful, transcript_quality
+from apps.voice.tts import TextToSpeech, is_speakable
 from apps.voice.vad import EndpointOutcome
 from libs.core.logging import get_logger
 from libs.schemas.chat import SendMessageRequest
@@ -136,3 +138,44 @@ class VoicePipeline:
             await self._cue.play(kind)
         except Exception:
             logger.exception("voice.cue_failed", kind=kind.value)
+
+
+class VoiceSpeaker:
+    def __init__(
+        self,
+        *,
+        tts: TextToSpeech,
+        player: SpeechPlayer,
+        state: VoiceStateMachine,
+    ) -> None:
+        self._tts = tts
+        self._player = player
+        self._state = state
+        self._turn = asyncio.Lock()
+
+    async def speak(self, text: str) -> bool:
+        if not is_speakable(text):
+            logger.info("voice.speak_skipped", chars=len(text))
+            return False
+
+        async with self._turn:
+            return await self._speak(text)
+
+    async def _speak(self, text: str) -> bool:
+        self._state.set(VoiceState.SPEAKING)
+        try:
+            speech = await self._tts.synthesize(text)
+            outcome = await self._player.play(speech)
+        except Exception:
+            logger.exception("voice.speak_failed", chars=len(text))
+            return False
+        else:
+            logger.info(
+                "voice.spoken",
+                chars=len(text),
+                outcome=outcome.value,
+                duration_s=round(speech.duration_s, 2),
+            )
+            return outcome is PlaybackOutcome.PLAYED
+        finally:
+            self._state.set(VoiceState.IDLE)
