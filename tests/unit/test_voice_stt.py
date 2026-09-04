@@ -9,6 +9,7 @@ from apps.voice.stt import (
     NO_SPEECH_PROB_LIMIT,
     Segment,
     Transcription,
+    build_transcription,
     is_meaningful,
     normalize_transcript,
     to_float32,
@@ -24,12 +25,12 @@ def noise(text: str = " Продолжение следует...") -> Segment:
     return Segment(text=text, no_speech_prob=0.95, avg_logprob=-1.8)
 
 
+def quiet(text: str, *, no_speech_prob: float = 0.05, avg_logprob: float = -0.2) -> Segment:
+    return Segment(text=text, no_speech_prob=no_speech_prob, avg_logprob=avg_logprob)
+
+
 def from_segments(*segments: Segment, language: str | None = "ru") -> Transcription:
-    return Transcription(
-        text="".join(segment.text for segment in segments).strip(),
-        language=language,
-        segments=segments,
-    )
+    return build_transcription(segments, language)
 
 
 def transcription(
@@ -187,3 +188,60 @@ def test_quality_of_an_utterance_without_segments_is_not_speech() -> None:
     assert quality.segments == 0
     assert quality.speech_segments == 0
     assert is_meaningful(Transcription(text="привет", language="ru", segments=())) is False
+
+
+def test_the_final_text_leaves_out_the_hallucinated_tail() -> None:
+    utterance = from_segments(
+        speech("собери отчёт за август"),
+        speech(" и положи его в Word"),
+        noise(" Продолжение следует..."),
+        noise(" Субтитры сделал DimaTorzok"),
+    )
+
+    assert utterance.text == "собери отчёт за август и положи его в Word"
+    assert is_meaningful(utterance) is True
+
+
+def test_the_dropped_tail_is_still_visible_in_the_metrics() -> None:
+    utterance = from_segments(speech("включи музыку"), noise(), noise())
+
+    assert utterance.segments == (speech("включи музыку"), noise(), noise())
+    assert transcript_quality(utterance).trimmed == 2
+
+
+def test_noise_in_the_middle_stays_in_the_text() -> None:
+    utterance = from_segments(
+        speech("собери отчёт"),
+        noise(" Продолжение следует..."),
+        speech(" и отправь почтой"),
+    )
+
+    assert utterance.text == "собери отчёт Продолжение следует... и отправь почтой"
+
+
+def test_an_utterance_of_nothing_but_noise_has_no_text_left() -> None:
+    utterance = from_segments(noise(), noise())
+
+    assert utterance.text == ""
+    assert is_meaningful(utterance) is False
+
+
+def test_a_quiet_tail_the_model_still_reads_as_speech_stays_in_the_text() -> None:
+    utterance = from_segments(
+        speech("собери отчёт за август из выгрузки"),
+        quiet(" и положи его в ворд", no_speech_prob=0.35, avg_logprob=-0.8),
+    )
+
+    assert utterance.text == "собери отчёт за август из выгрузки и положи его в ворд"
+    assert is_meaningful(utterance) is True
+
+
+def test_a_quiet_tail_the_model_doubts_is_lost_from_the_text() -> None:
+    utterance = from_segments(
+        speech("собери отчёт за август из выгрузки"),
+        quiet(" и положи его в ворд", avg_logprob=AVG_LOGPROB_LIMIT - 0.1),
+    )
+
+    assert utterance.text == "собери отчёт за август из выгрузки"
+    assert is_meaningful(utterance) is True
+    assert transcript_quality(utterance).trimmed == 1

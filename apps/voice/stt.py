@@ -77,6 +77,20 @@ def without_trailing_noise(segments: Sequence[Segment]) -> tuple[Segment, ...]:
     return tuple(segments[:end])
 
 
+def transcript_text(segments: Sequence[Segment]) -> str:
+    return normalize_transcript(
+        "".join(segment.text for segment in without_trailing_noise(segments))
+    )
+
+
+def build_transcription(segments: Sequence[Segment], language: str | None) -> Transcription:
+    return Transcription(
+        text=transcript_text(segments),
+        language=language,
+        segments=tuple(segments),
+    )
+
+
 def transcript_quality(transcription: Transcription) -> TranscriptQuality:
     body = without_trailing_noise(transcription.segments)
     trimmed = len(transcription.segments) - len(body)
@@ -172,8 +186,4 @@ class FasterWhisperSTT:
             for segment in segments
         )
 
-        return Transcription(
-            text=normalize_transcript("".join(segment.text for segment in recognised)),
-            language=info.language,
-            segments=recognised,
-        )
+        return build_transcription(recognised, info.language)
