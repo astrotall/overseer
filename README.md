@@ -134,7 +134,7 @@ overseer/
 │   ├── core/                # config (pydantic-settings), logging (structlog), exceptions
 │   ├── db/                  # SQLAlchemy Base, async engine/session, Redis, models
 │   ├── llm/                 # Anthropic/DeepSeek clients, tool-calling base (stub)
-│   ├── tools/               # the agent's tool registry (empty for now)
+│   ├── tools/               # the agent's tool protocol; the registry is not there yet
 │   └── schemas/             # Pydantic v2 DTOs
 ├── alembic/                 # migrations, env.py wired to the async engine and libs.db
 ├── docker/
@@ -314,7 +314,8 @@ job; we do not merge a red CI.
 - ✅ docker compose with the whole infrastructure;
 - ⏳ ORM models — empty, a stub;
 - ⏳ LLM clients — interfaces only, generation is not implemented;
-- ⏳ the tool registry and tool calling — not implemented;
+- ⏳ tool calling — the tool protocol (`libs/tools/base.py`) is fixed, the registry and
+  the dispatcher are not implemented;
 - ⏳ `apps/executor` (COM/Playwright) — an empty package with a README;
 - ✅ `apps/voice` — the loop is closed (OVE-45 … OVE-48): capture through `sounddevice`,
   openWakeWord detection and utterance capture in a worker thread, energy-based
