@@ -13,10 +13,12 @@ from libs.db.repositories import ConversationRepository
 from libs.db.session import get_session
 from libs.llm.base import LLMClient
 from libs.llm.factory import get_llm_client
+from libs.tools import ToolRegistry, get_tool_registry
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 RedisDep = Annotated[Redis, Depends(get_redis)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+ToolRegistryDep = Annotated[ToolRegistry, Depends(get_tool_registry)]
 
 
 def get_active_llm_client(settings: SettingsDep) -> LLMClient:
@@ -46,6 +48,7 @@ __all__ = [
     "RedisDep",
     "SessionDep",
     "SettingsDep",
+    "ToolRegistryDep",
     "get_active_llm_client",
     "get_chat_service",
     "get_conversation_repository",
