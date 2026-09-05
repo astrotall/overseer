@@ -99,9 +99,12 @@ class Tool(ABC, Generic[ArgumentsT]):
         except RUNTIME_FAILURES:
             logger.exception("tool.execution_crashed", tool=self.name)
             raise
-        except Exception as exc:
+        except Exception:
             logger.exception("tool.execution_failed", tool=self.name)
-            return ToolResult.failed(f"Инструмент {self.name} завершился ошибкой: {exc}")
+            return ToolResult.failed(
+                f"Инструмент {self.name} завершился внутренней ошибкой. "
+                "Детали остались в логах сервера."
+            )
 
     @abstractmethod
     async def _execute(self, arguments: ArgumentsT) -> ToolResult: ...

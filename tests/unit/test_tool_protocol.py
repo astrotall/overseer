@@ -21,6 +21,12 @@ class BoomArguments(BaseModel):
     value: int
 
 
+SENSITIVE_FAILURE = (
+    "[Errno 13] Permission denied: "
+    r"'C:\Users\ivan\Документы\Зарплаты за август.docx'"
+)
+
+
 class BoomTool(Tool[BoomArguments]):
     name = "boom"
     description = "Всегда падает: проверка того, что исключение не выходит наружу"
@@ -28,7 +34,7 @@ class BoomTool(Tool[BoomArguments]):
     arguments_model = BoomArguments
 
     async def _execute(self, arguments: BoomArguments) -> ToolResult:
-        raise RuntimeError(f"нет соединения с Word ({arguments.value})")
+        raise RuntimeError(SENSITIVE_FAILURE)
 
 
 class CrashingTool(Tool[BoomArguments]):
@@ -109,20 +115,40 @@ async def test_an_exception_inside_a_tool_comes_back_as_an_error_result() -> Non
 
     assert result.is_error
     assert result.error is not None
-    assert "нет соединения с Word" in result.error
+    assert "boom" in result.error
+    assert result.summary == result.error
+
+
+async def test_what_the_exception_said_never_reaches_the_model() -> None:
+    result = await BoomTool().execute({"value": 1})
+
+    assert result.error is not None
+    assert SENSITIVE_FAILURE not in result.error
+    assert "Зарплаты за август" not in repr(result)
+    assert "ivan" not in repr(result)
+    assert "RuntimeError" not in repr(result)
+
+
+async def test_the_message_is_the_same_no_matter_what_went_wrong() -> None:
+    one = await CrashingTool(OSError(SENSITIVE_FAILURE)).execute({"value": 1})
+    another = await CrashingTool(TimeoutError("word.exe не ответил за 30 с")).execute({"value": 1})
+
+    assert one == another
 
 
 async def test_a_bug_inside_a_tool_is_logged_with_a_full_traceback() -> None:
     with captured_logs() as entries:
-        await BoomTool().execute({"value": 1})
+        result = await BoomTool().execute({"value": 1})
 
     (entry,) = entries
     assert entry["event"] == "tool.execution_failed"
     assert entry["log_level"] == "error"
     assert entry["tool"] == "boom"
     assert "Traceback (most recent call last)" in entry["exception"]
-    assert "RuntimeError: нет соединения с Word (1)" in entry["exception"]
+    assert f"RuntimeError: {SENSITIVE_FAILURE}" in entry["exception"]
     assert "_execute" in entry["exception"]
+    assert result.error is not None
+    assert SENSITIVE_FAILURE not in result.error
 
 
 async def test_arguments_the_model_got_wrong_are_logged_without_a_traceback() -> None:
