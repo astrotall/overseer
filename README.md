@@ -314,8 +314,10 @@ job; we do not merge a red CI.
 - ✅ docker compose with the whole infrastructure;
 - ⏳ ORM models — empty, a stub;
 - ⏳ LLM clients — interfaces only, generation is not implemented;
-- ⏳ tool calling — the tool protocol (`libs/tools/base.py`) is fixed, the registry and
-  the dispatcher are not implemented;
+- ⏳ tool calling — the tool protocol (`libs/tools/base.py`), the registry
+  (`libs/tools/registry.py`) and the dispatch loop inside `ChatService` are in place;
+  no real tool exists yet — only the reference `EchoTool`, and confirmation of
+  irreversible actions is still a seam with a placeholder default;
 - ⏳ `apps/executor` (COM/Playwright) — an empty package with a README;
 - ✅ `apps/voice` — the loop is closed (OVE-45 … OVE-48): capture through `sounddevice`,
   openWakeWord detection and utterance capture in a worker thread, energy-based
