@@ -15,6 +15,7 @@ from sqlalchemy.pool import NullPool
 from starlette.websockets import WebSocketDisconnect
 
 from apps.api.deps import get_active_llm_client
+from apps.api.routes.ws import _resolve_conversation_id
 from libs.core.exceptions import LLMTransientError
 from libs.db.models import Conversation, Message
 from libs.db.repositories import ConversationRepository
@@ -275,3 +276,29 @@ async def test_connection_without_conversation_id_uses_the_default_conversation(
     finally:
         if default_id is not None:
             await _delete_conversation(db_engine, default_id)
+
+
+@pytest.mark.integration
+async def test_resolve_conversation_id_with_explicit_id_releases_the_connection(
+    db_engine: AsyncEngine, conversation_id: uuid.UUID
+) -> None:
+    async with AsyncSession(db_engine, expire_on_commit=False) as session:
+        repository = ConversationRepository(session)
+
+        resolved = await _resolve_conversation_id(repository, session, conversation_id)
+
+        assert resolved == conversation_id
+        assert not session.in_transaction()
+
+
+@pytest.mark.integration
+async def test_resolve_conversation_id_without_explicit_id_releases_the_connection(
+    db_engine: AsyncEngine,
+) -> None:
+    async with AsyncSession(db_engine, expire_on_commit=False) as session:
+        repository = ConversationRepository(session)
+
+        resolved = await _resolve_conversation_id(repository, session, None)
+
+        assert resolved is not None
+        assert not session.in_transaction()
