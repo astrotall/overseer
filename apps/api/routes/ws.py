@@ -58,7 +58,9 @@ async def _resolve_conversation_id(
         await session.commit()
         return resolved
 
-    if await repository.conversation_exists(conversation_id):
+    exists = await repository.conversation_exists(conversation_id)
+    await session.commit()
+    if exists:
         return conversation_id
     return None
 
