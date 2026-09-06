@@ -28,8 +28,10 @@ def get_active_llm_client(settings: SettingsDep) -> LLMClient:
 LLMClientDep = Annotated[LLMClient, Depends(get_active_llm_client)]
 
 
-def get_chat_service(session: SessionDep, llm_client: LLMClientDep) -> ChatService:
-    return ChatService(session, llm_client)
+def get_chat_service(
+    session: SessionDep, llm_client: LLMClientDep, tool_registry: ToolRegistryDep
+) -> ChatService:
+    return ChatService(session, llm_client, tool_registry=tool_registry)
 
 
 ChatServiceDep = Annotated[ChatService, Depends(get_chat_service)]

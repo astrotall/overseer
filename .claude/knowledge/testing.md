@@ -6,6 +6,21 @@
 
 - `tests/conftest.py` — общие фикстуры (см. ниже);
 - `tests/integration/test_health.py` — smoke-тест `GET /health`;
+- `tests/integration/test_chat_service.py` — ход диалога целиком на живой базе: цикл вызова
+  инструментов (OVE-22) — выполнение, персист `tool_use` + `tool_result` + финального
+  текста, лимит раундов, инструмент с `requires_confirmation` и подменяемый шов
+  подтверждения, выдуманное моделью имя инструмента, откат хода при падении LLM посреди
+  цикла, — и два параметризованных теста среза истории: при любом `history_limit` то, что
+  уходит в LLM, начинается с `role="user"`, не содержит `tool_result` без своего `tool_use`
+  и `tool_use` без своего `tool_result`. Второй из них
+  (`test_history_slice_never_starts_mid_turn_around_an_exhausted_turn`) отличается тестовыми
+  данными: в середине диалога стоит ход, который кончился **по лимиту раундов**, а не
+  ответом модели, — записанный не руками, а прогоном самой `ChatService` с
+  `max_tool_rounds=2`. Это единственная концовка хода, форма которой держится на явном
+  решении *не сохранять* последний невыполненный `tool_use` (OVE-22), поэтому она проверена
+  отдельно, а не считается корректной по построению; парность вызовов и результатов
+  пришпилена в общем хелпере `_assert_history_is_well_formed`, и без этого решения тест
+  краснеет на срезах, задевающих такой ход;
 - `tests/unit/` — юнит-тесты бизнес-логики: конфиг, LLM-клиенты и фабрика, контракт
   `libs/llm/base.py`, протокол инструмента `libs/tools/base.py` (`test_tool_protocol.py`:
   прямой вызов `EchoTool`, построение `ToolSpec`, ошибки аргументов и исключение внутри
@@ -21,7 +36,9 @@
   оркестрация (`pipeline.py`), нарезка текста под синтез (`tts.py`), воспроизведение через
   фейковый `AudioSink` (`playback.py`), переходы состояния на озвучке
   (`test_voice_speaker.py`), клиент `/ws/chat` через фейковое соединение
-  (`test_voice_ws_client.py`) и изоляция от CI (`test_voice_ci_isolation.py`);
+  (`test_voice_ws_client.py`) и изоляция от CI (`test_voice_ci_isolation.py`), а по
+  `apps/api` — подрезка среза истории до границы хода (`test_chat_history_slice.py`:
+  чистая функция `cut_to_turn_boundary`, без базы);
 - секции `[tool.pytest.ini_options]` и `[tool.coverage.*]` в `pyproject.toml`;
 - `.pre-commit-config.yaml` — хуки на трёх стадиях (`pre-commit`, `commit-msg`, `pre-push`);
 - `.github/workflows/ci.yml` — CI на GitHub Actions.

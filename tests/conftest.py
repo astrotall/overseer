@@ -20,6 +20,7 @@ from apps.api.main import app as fastapi_app
 from libs.core.config import Settings, get_settings
 from libs.db import models
 from libs.llm import ToolCall
+from libs.tools import init_tool_registry, reset_tool_registry
 
 
 @pytest.fixture(scope="session")
@@ -74,8 +75,10 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 
 @pytest.fixture
 def app() -> Iterator[FastAPI]:
+    init_tool_registry()
     yield fastapi_app
     fastapi_app.dependency_overrides.clear()
+    reset_tool_registry()
 
 
 @pytest.fixture
