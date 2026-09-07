@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 from fastapi import FastAPI
@@ -44,6 +45,20 @@ def test_database_url(settings: Settings) -> str:
     return url.set(database=f"{url.database}_test").render_as_string(hide_password=False)
 
 
+REDIS_LOGICAL_DATABASES = 16
+
+
+@pytest.fixture(scope="session")
+def test_redis_url(settings: Settings) -> str:
+    if settings.redis_url_test:
+        return settings.redis_url_test
+
+    parts = urlsplit(settings.redis_url)
+    db = int(parts.path.lstrip("/") or "0")
+    test_db = (db + 1) % REDIS_LOGICAL_DATABASES
+    return urlunsplit(parts._replace(path=f"/{test_db}"))
+
+
 @pytest.fixture(scope="session")
 async def db_engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(test_database_url, poolclass=NullPool, future=True)
@@ -61,15 +76,15 @@ async def db_engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
 
 
 @pytest.fixture(scope="session")
-async def redis_client(settings: Settings) -> AsyncIterator[Redis]:
-    client: Redis = from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+async def redis_client(test_redis_url: str) -> AsyncIterator[Redis]:
+    client: Redis = from_url(test_redis_url, encoding="utf-8", decode_responses=True)
     try:
         await client.ping()
     except RedisError as exc:
         await client.aclose()
         if os.getenv("CI"):
             raise
-        pytest.skip(f"Redis недоступен ({settings.redis_url}): {exc}")
+        pytest.skip(f"Redis недоступен ({test_redis_url}): {exc}")
 
     yield client
     await client.aclose()
