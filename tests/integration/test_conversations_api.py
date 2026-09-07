@@ -64,6 +64,7 @@ class ScriptedLLMClient(LLMClient):
 
     def __init__(self, outcomes: Sequence[LLMResponse]) -> None:
         self._outcomes = list(outcomes)
+        self.received_messages: list[Sequence[ChatMessage]] = []
 
     async def complete(
         self,
@@ -74,6 +75,7 @@ class ScriptedLLMClient(LLMClient):
         max_tokens: int = 4096,
         temperature: float | None = None,
     ) -> LLMResponse:
+        self.received_messages.append(messages)
         return self._outcomes.pop(0)
 
 
@@ -279,6 +281,15 @@ async def test_a_tool_that_raises_inside_a_full_http_turn_comes_back_as_a_reply(
     assert tool_message.content is not None
     assert "boom_http" in tool_message.content
     assert "буум изнутри инструмента" not in tool_message.content
+
+    assert len(llm_client.received_messages) == 2
+    second_call_messages = llm_client.received_messages[1]
+    sent_tool_message = second_call_messages[-1]
+    assert sent_tool_message.role == "tool"
+    assert sent_tool_message.tool_call_id == "call-1"
+    assert sent_tool_message.is_error is True
+    assert sent_tool_message.content is not None
+    assert "буум изнутри инструмента" not in sent_tool_message.content
 
     failure_entries = [entry for entry in log_entries if entry["event"] == "tool.execution_failed"]
     assert len(failure_entries) == 1
