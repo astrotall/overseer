@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from redis.asyncio import Redis, from_url
+from redis.exceptions import RedisError, ResponseError
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
@@ -42,6 +45,20 @@ def test_database_url(settings: Settings) -> str:
     return url.set(database=f"{url.database}_test").render_as_string(hide_password=False)
 
 
+REDIS_LOGICAL_DATABASES = 16
+
+
+@pytest.fixture(scope="session")
+def test_redis_url(settings: Settings) -> str:
+    if settings.redis_url_test:
+        return settings.redis_url_test
+
+    parts = urlsplit(settings.redis_url)
+    db = int(parts.path.lstrip("/") or "0")
+    test_db = (db + 1) % REDIS_LOGICAL_DATABASES
+    return urlunsplit(parts._replace(path=f"/{test_db}"))
+
+
 @pytest.fixture(scope="session")
 async def db_engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(test_database_url, poolclass=NullPool, future=True)
@@ -56,6 +73,46 @@ async def db_engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
 
     yield engine
     await engine.dispose()
+
+
+CLUSTER_MODE_SELECT_ERROR_MARKER = "SELECT is not allowed in cluster mode"
+
+
+class RedisClusterModeNotSupportedError(RuntimeError):
+    """Raised when the derived test database can't be selected because Redis runs in
+    cluster mode (or another setup that only supports logical database 0)."""
+
+
+def _raise_if_cluster_mode_select_error(exc: ResponseError, *, redis_url_test: str | None) -> None:
+    if redis_url_test:
+        return
+    if CLUSTER_MODE_SELECT_ERROR_MARKER not in str(exc):
+        return
+    raise RedisClusterModeNotSupportedError(
+        "REDIS_URL_TEST must be set explicitly - the configured Redis does not support "
+        "multiple logical databases (cluster mode)"
+    ) from exc
+
+
+@pytest.fixture(scope="session")
+async def redis_client(test_redis_url: str, settings: Settings) -> AsyncIterator[Redis]:
+    client: Redis = from_url(test_redis_url, encoding="utf-8", decode_responses=True)
+    try:
+        await client.ping()
+    except ResponseError as exc:
+        await client.aclose()
+        _raise_if_cluster_mode_select_error(exc, redis_url_test=settings.redis_url_test)
+        if os.getenv("CI"):
+            raise
+        pytest.skip(f"Redis недоступен ({test_redis_url}): {exc}")
+    except RedisError as exc:
+        await client.aclose()
+        if os.getenv("CI"):
+            raise
+        pytest.skip(f"Redis недоступен ({test_redis_url}): {exc}")
+
+    yield client
+    await client.aclose()
 
 
 @pytest.fixture

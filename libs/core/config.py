@@ -38,6 +38,13 @@ class Settings(BaseSettings):
             "имя базы с суффиксом _test — рабочая база никогда не используется."
         ),
     )
+    redis_url_test: str | None = Field(
+        default=None,
+        description=(
+            "Redis для тестов. Если не задан, тесты берут redis_url и подставляют "
+            "соседний номер логической базы — рабочий Redis никогда не используется."
+        ),
+    )
 
     llm_provider: LLMProvider = Field(
         default="deepseek",
