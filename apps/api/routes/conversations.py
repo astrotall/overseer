@@ -5,7 +5,13 @@ import uuid
 from fastapi import APIRouter, HTTPException, status
 
 from apps.api.deps import ChatServiceDep, ConversationRepositoryDep, SessionDep
-from libs.schemas.chat import CreateConversationResponse, MessageResponse, SendMessageRequest
+from apps.api.exception_handlers import CONFIRMATION_REQUIRED_STATUS_CODE
+from libs.schemas.chat import (
+    ConfirmationRequiredResponse,
+    CreateConversationResponse,
+    MessageResponse,
+    SendMessageRequest,
+)
 
 router = APIRouter(prefix="/conversations", tags=["chat"])
 
@@ -27,6 +33,12 @@ async def create_conversation(
 @router.post(
     "/{conversation_id}/messages",
     response_model=MessageResponse,
+    responses={
+        CONFIRMATION_REQUIRED_STATUS_CODE: {
+            "model": ConfirmationRequiredResponse,
+            "description": "Ход приостановлен: инструмент требует подтверждения пользователя",
+        }
+    },
     summary="Отправить сообщение в диалог и получить ответ ассистента",
 )
 async def send_message(

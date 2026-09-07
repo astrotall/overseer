@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar, Generic, Literal, Self, TypeVar
 
@@ -14,6 +15,8 @@ logger = get_logger(__name__)
 ToolStatus = Literal["ok", "error"]
 
 RUNTIME_FAILURES: tuple[type[Exception], ...] = (MemoryError, RecursionError, SystemError)
+
+MAX_DESCRIBED_ARGUMENTS_CHARS = 300
 
 ArgumentsT = TypeVar("ArgumentsT", bound=BaseModel)
 
@@ -80,6 +83,9 @@ class Tool(ABC, Generic[ArgumentsT]):
     def to_spec(self) -> ToolSpec:
         return ToolSpec.from_model(self.name, self.description, self.arguments_model)
 
+    def describe_call(self, arguments: dict[str, Any]) -> str:
+        return f"{self.description} Вызов: {self.name}({_render_arguments(arguments)})"
+
     async def execute(self, arguments: dict[str, Any]) -> ToolResult:
         try:
             parsed = self.arguments_model.model_validate(arguments)
@@ -108,6 +114,16 @@ class Tool(ABC, Generic[ArgumentsT]):
 
     @abstractmethod
     async def _execute(self, arguments: ArgumentsT) -> ToolResult: ...
+
+
+def _render_arguments(arguments: dict[str, Any]) -> str:
+    rendered = ", ".join(
+        f"{name}={json.dumps(value, ensure_ascii=False, default=str)}"
+        for name, value in arguments.items()
+    )
+    if len(rendered) <= MAX_DESCRIBED_ARGUMENTS_CHARS:
+        return rendered
+    return f"{rendered[: MAX_DESCRIBED_ARGUMENTS_CHARS - 1]}…"
 
 
 def _format_validation_error(exc: ValidationError) -> str:

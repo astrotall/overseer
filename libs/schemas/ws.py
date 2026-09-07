@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
-from libs.schemas.chat import MessageResponse, SendMessageRequest
+from libs.schemas.chat import ConfirmationRequiredResponse, MessageResponse, SendMessageRequest
 from libs.schemas.common import ErrorResponse
 
 
@@ -18,6 +18,11 @@ class WSReplyMessage(BaseModel):
     payload: MessageResponse
 
 
+class WSConfirmationRequiredMessage(BaseModel):
+    type: Literal["confirmation_required"] = "confirmation_required"
+    payload: ConfirmationRequiredResponse
+
+
 class WSErrorPayload(ErrorResponse):
     code: int
 
@@ -27,4 +32,7 @@ class WSErrorMessage(BaseModel):
     payload: WSErrorPayload
 
 
-WSServerMessage = Annotated[WSReplyMessage | WSErrorMessage, Field(discriminator="type")]
+WSServerMessage = Annotated[
+    WSReplyMessage | WSConfirmationRequiredMessage | WSErrorMessage,
+    Field(discriminator="type"),
+]

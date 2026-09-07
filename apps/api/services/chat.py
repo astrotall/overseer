@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from libs.confirmations import ConfirmationRequiredError
 from libs.core.exceptions import NotFoundError
 from libs.core.logging import get_logger
 from libs.db.repositories import ConversationRepository
@@ -23,10 +24,12 @@ TOOL_ROUNDS_EXHAUSTED_TEXT = (
     "Сформулируйте задачу точнее или разбейте её на шаги."
 )
 
-ConfirmationHandler = Callable[[Tool[Any], ToolCall], Awaitable[ToolResult]]
+ConfirmationHandler = Callable[[uuid.UUID, Tool[Any], ToolCall], Awaitable[ToolResult]]
 
 
-async def confirmation_is_unavailable(tool: Tool[Any], call: ToolCall) -> ToolResult:
+async def confirmation_is_unavailable(
+    conversation_id: uuid.UUID, tool: Tool[Any], call: ToolCall
+) -> ToolResult:
     return ToolResult.failed(
         f"Инструмент {tool.name} требует подтверждения пользователя, а механизм подтверждения "
         "ещё не реализован: вызов не выполнен. Скажи об этом пользователю и предложи путь "
@@ -83,6 +86,14 @@ class ChatService:
             answer = await self._run_turn(conversation_id, history)
             await self._session.commit()
             return answer
+        except ConfirmationRequiredError as exc:
+            await self._session.commit()
+            logger.info(
+                "chat.turn_paused_for_confirmation",
+                conversation_id=str(conversation_id),
+                confirmation_id=str(exc.confirmation_id),
+            )
+            raise
         except Exception:
             await self._session.rollback()
             raise
@@ -146,49 +157,82 @@ class ChatService:
         response: LLMResponse,
     ) -> None:
         requested = response.to_message()
+        results = await self._resolve_tool_calls(conversation_id, response.tool_calls)
+
         await self._repository.append_message(conversation_id, requested)
         conversation.append(requested)
 
-        for call in response.tool_calls:
-            result = await self._invoke(conversation_id, call)
+        for call, result in results:
             tool_message = _to_tool_message(call, result)
             await self._repository.append_message(conversation_id, tool_message)
             conversation.append(tool_message)
 
-    async def _invoke(self, conversation_id: uuid.UUID, call: ToolCall) -> ToolResult:
+    async def _resolve_tool_calls(
+        self, conversation_id: uuid.UUID, calls: Sequence[ToolCall]
+    ) -> list[tuple[ToolCall, ToolResult]]:
+        tools = [self._lookup(conversation_id, call) for call in calls]
+
+        confirmed: dict[int, ToolResult] = {}
+        for index, (call, tool) in enumerate(zip(calls, tools, strict=True)):
+            if tool is not None and tool.requires_confirmation:
+                confirmed[index] = await self._confirm(conversation_id, tool, call)
+
+        results: list[tuple[ToolCall, ToolResult]] = []
+        for index, (call, tool) in enumerate(zip(calls, tools, strict=True)):
+            result = confirmed.get(index)
+            if result is None:
+                result = await self._execute(conversation_id, tool, call)
+            results.append((call, result))
+        return results
+
+    def _lookup(self, conversation_id: uuid.UUID, call: ToolCall) -> Tool[Any] | None:
         assert self._tool_registry is not None
 
         try:
-            tool = self._tool_registry.get(call.name)
+            return self._tool_registry.get(call.name)
         except NotFoundError:
             logger.warning(
                 "chat.tool_not_found",
                 conversation_id=str(conversation_id),
                 tool=call.name,
             )
+            return None
+
+    async def _confirm(
+        self, conversation_id: uuid.UUID, tool: Tool[Any], call: ToolCall
+    ) -> ToolResult:
+        logger.info(
+            "chat.tool_confirmation_required",
+            conversation_id=str(conversation_id),
+            tool=tool.name,
+            tool_call_id=call.id,
+        )
+        result = await self._confirmation_handler(conversation_id, tool, call)
+        self._log_call_finished(conversation_id, tool.name, call, result)
+        return result
+
+    async def _execute(
+        self, conversation_id: uuid.UUID, tool: Tool[Any] | None, call: ToolCall
+    ) -> ToolResult:
+        if tool is None:
             return ToolResult.failed(
                 f"Инструмента '{call.name}' не существует. Выбери инструмент из списка доступных."
             )
 
-        if tool.requires_confirmation:
-            logger.info(
-                "chat.tool_confirmation_required",
-                conversation_id=str(conversation_id),
-                tool=tool.name,
-                tool_call_id=call.id,
-            )
-            result = await self._confirmation_handler(tool, call)
-        else:
-            result = await tool.execute(call.arguments)
+        result = await tool.execute(call.arguments)
+        self._log_call_finished(conversation_id, tool.name, call, result)
+        return result
 
+    def _log_call_finished(
+        self, conversation_id: uuid.UUID, tool_name: str, call: ToolCall, result: ToolResult
+    ) -> None:
         logger.info(
             "chat.tool_call_finished",
             conversation_id=str(conversation_id),
-            tool=tool.name,
+            tool=tool_name,
             tool_call_id=call.id,
             status=result.status,
         )
-        return result
 
     def _tool_specs(self) -> list[ToolSpec]:
         if self._tool_registry is None:

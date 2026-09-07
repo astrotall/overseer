@@ -27,3 +27,8 @@ class SendMessageRequest(BaseModel):
 class MessageResponse(BaseModel):
     role: Role
     content: str | None = None
+
+
+class ConfirmationRequiredResponse(BaseModel):
+    confirmation_id: uuid.UUID
+    summary: str

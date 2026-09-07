@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from typing import Any
 
 import pytest
 import structlog
@@ -10,7 +11,8 @@ from httpx import AsyncClient
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.deps import get_active_llm_client
+from apps.api.deps import get_active_llm_client, get_confirmation_store
+from libs.confirmations import ConfirmationStore, PendingConfirmation
 from libs.core.exceptions import LLMBadRequestError, LLMResponseError, LLMTransientError
 from libs.db.repositories import ConversationRepository
 from libs.db.session import get_session
@@ -96,6 +98,52 @@ class BoomTool(Tool[BoomArguments]):
         raise RuntimeError("буум изнутри инструмента")
 
 
+class DangerousArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+
+
+class DangerousTool(Tool[DangerousArguments]):
+    name = "delete_file"
+    description = "Удаляет файл — необратимое действие, требует подтверждения."
+    arguments_model = DangerousArguments
+    requires_confirmation = True
+
+    def __init__(self) -> None:
+        self.executed = False
+
+    async def _execute(self, arguments: DangerousArguments) -> ToolResult:
+        self.executed = True
+        return ToolResult.ok(summary=f"Файл {arguments.path} удалён")
+
+
+class RecordingConfirmationStore(ConfirmationStore):
+    """Store без Redis: OVE-26 проверяет форму ответа транспорта, а не хранилище."""
+
+    def __init__(self) -> None:
+        self.pending: dict[uuid.UUID, PendingConfirmation] = {}
+
+    async def create_pending(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        summary: str,
+    ) -> uuid.UUID:
+        confirmation_id = uuid.uuid4()
+        self.pending[confirmation_id] = PendingConfirmation(
+            conversation_id=conversation_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            summary=summary,
+        )
+        return confirmation_id
+
+
 def _override_session(app: FastAPI, db_session: AsyncSession) -> None:
     async def _get_session() -> AsyncIterator[AsyncSession]:
         yield db_session
@@ -108,6 +156,13 @@ def _override_llm_client(app: FastAPI, llm_client: LLMClient) -> None:
         return llm_client
 
     app.dependency_overrides[get_active_llm_client] = _get_llm_client
+
+
+def _override_confirmation_store(app: FastAPI, store: ConfirmationStore) -> None:
+    def _get_confirmation_store() -> ConfirmationStore:
+        return store
+
+    app.dependency_overrides[get_confirmation_store] = _get_confirmation_store
 
 
 @pytest.mark.integration
@@ -298,3 +353,52 @@ async def test_a_tool_that_raises_inside_a_full_http_turn_comes_back_as_a_reply(
     assert failure_entry["tool"] == "boom_http"
     assert "Traceback (most recent call last)" in failure_entry["exception"]
     assert "RuntimeError: буум изнутри инструмента" in failure_entry["exception"]
+
+
+@pytest.mark.integration
+async def test_a_tool_that_requires_confirmation_pauses_the_http_turn(
+    app: FastAPI, async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """OVE-26: пауза хода — отдельная форма ответа (202 с confirmation_id и summary),
+    а не обычный MessageResponse; в базе остаётся только сообщение пользователя."""
+    _override_session(app, db_session)
+    tool = DangerousTool()
+    get_tool_registry().register(tool)
+    store = RecordingConfirmationStore()
+    _override_confirmation_store(app, store)
+    call = ToolCall(id="call-1", name="delete_file", arguments={"path": "отчёт.docx"})
+    _override_llm_client(
+        app,
+        ScriptedLLMClient(
+            [
+                LLMResponse(
+                    model="fake-model",
+                    stop_reason="tool_use",
+                    text="сейчас удалю",
+                    tool_calls=[call],
+                )
+            ]
+        ),
+    )
+    repository = ConversationRepository(db_session)
+    conversation_id = await repository.create_conversation()
+    await db_session.commit()
+
+    response = await async_client.post(
+        f"/conversations/{conversation_id}/messages", json={"content": "удали отчёт"}
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert set(body) == {"confirmation_id", "summary"}
+    assert tool.executed is False
+
+    pending = store.pending[uuid.UUID(body["confirmation_id"])]
+    assert pending.tool_call_id == "call-1"
+    assert pending.tool_name == "delete_file"
+    assert pending.arguments == {"path": "отчёт.docx"}
+    assert body["summary"] == pending.summary
+
+    assert await repository.get_history(conversation_id) == [
+        ChatMessage(role="user", content="удали отчёт")
+    ]

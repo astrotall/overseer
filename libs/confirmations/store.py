@@ -17,6 +17,7 @@ class PendingConfirmation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     conversation_id: uuid.UUID
+    tool_call_id: str
     tool_name: str
     arguments: dict[str, Any]
     summary: str
@@ -30,6 +31,8 @@ class ConfirmationStore:
     async def create_pending(
         self,
         conversation_id: uuid.UUID,
+        *,
+        tool_call_id: str,
         tool_name: str,
         arguments: dict[str, Any],
         summary: str,
@@ -37,6 +40,7 @@ class ConfirmationStore:
         confirmation_id = uuid.uuid4()
         pending = PendingConfirmation(
             conversation_id=conversation_id,
+            tool_call_id=tool_call_id,
             tool_name=tool_name,
             arguments=arguments,
             summary=summary,

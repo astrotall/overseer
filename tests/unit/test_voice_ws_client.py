@@ -24,6 +24,7 @@ from apps.voice.state import VoiceState, VoiceStateMachine
 from apps.voice.stt import Segment, Transcription
 from apps.voice.vad import EndpointOutcome
 from apps.voice.ws_client import (
+    CONFIRMATION_SPEECH,
     ERROR_SPEECH,
     RECONNECT_MAX_S,
     VoiceWSClient,
@@ -131,6 +132,15 @@ def error(code: int = 503) -> str:
                 "detail": "провайдер недоступен",
                 "code": code,
             },
+        }
+    )
+
+
+def confirmation_required(summary: str = "Удалить файл отчёт.docx") -> str:
+    return json.dumps(
+        {
+            "type": "confirmation_required",
+            "payload": {"confirmation_id": str(uuid.uuid4()), "summary": summary},
         }
     )
 
@@ -328,6 +338,24 @@ class TestReceiving:
             await eventually(lambda: speaker.spoken)
 
         assert speaker.spoken == [ERROR_SPEECH]
+
+    async def test_a_confirmation_request_is_answered_honestly_not_silently(self) -> None:
+        connection = FakeConnection(confirmation_required(), answer=True)
+        transcripts: asyncio.Queue[Transcript] = asyncio.Queue(maxsize=1)
+        speaker = FakeSpeaker()
+        state = VoiceStateMachine()
+        client = make_client(
+            FakeConnector(connection), transcripts=transcripts, speaker=speaker, state=state
+        )
+
+        async with running(client):
+            await eventually(lambda: client.epoch == FIRST_EPOCH)
+            state.set(VoiceState.THINKING)
+            transcripts.put_nowait(transcript(epoch=FIRST_EPOCH))
+            await eventually(lambda: speaker.spoken)
+
+        assert speaker.spoken == [CONFIRMATION_SPEECH]
+        assert state.state is VoiceState.IDLE
 
     async def test_an_empty_reply_is_not_spoken(self) -> None:
         connection = FakeConnection(reply(None), answer=True)

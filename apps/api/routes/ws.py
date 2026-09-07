@@ -10,11 +10,18 @@ from starlette.types import Message
 from apps.api.deps import ChatServiceDep, ConversationRepositoryDep, SessionDep
 from apps.api.exception_handlers import llm_error_status_code
 from apps.api.services import ChatService
+from libs.confirmations import ConfirmationRequiredError
 from libs.core.exceptions import LLMError, NotFoundError, OverseerError
 from libs.core.logging import get_logger
 from libs.db.repositories import ConversationRepository
-from libs.schemas.chat import MessageResponse
-from libs.schemas.ws import WSErrorMessage, WSErrorPayload, WSIncomingMessage, WSReplyMessage
+from libs.schemas.chat import ConfirmationRequiredResponse, MessageResponse
+from libs.schemas.ws import (
+    WSConfirmationRequiredMessage,
+    WSErrorMessage,
+    WSErrorPayload,
+    WSIncomingMessage,
+    WSReplyMessage,
+)
 
 logger = get_logger(__name__)
 
@@ -41,6 +48,13 @@ def _validation_detail(exc: ValidationError) -> str:
 
 async def _send_reply(websocket: WebSocket, payload: MessageResponse) -> None:
     await websocket.send_json(WSReplyMessage(payload=payload).model_dump())
+
+
+async def _send_confirmation_required(
+    websocket: WebSocket, payload: ConfirmationRequiredResponse
+) -> None:
+    envelope = WSConfirmationRequiredMessage(payload=payload)
+    await websocket.send_json(envelope.model_dump(mode="json"))
 
 
 async def _send_error(websocket: WebSocket, *, error: str, detail: str, code: int) -> None:
@@ -85,6 +99,17 @@ async def _handle_turn(
 
     try:
         answer = await chat_service.send_message(conversation_id, incoming.payload.content)
+    except ConfirmationRequiredError as exc:
+        logger.info(
+            "ws.confirmation_required",
+            conversation_id=str(conversation_id),
+            confirmation_id=str(exc.confirmation_id),
+        )
+        await _send_confirmation_required(
+            websocket,
+            ConfirmationRequiredResponse(confirmation_id=exc.confirmation_id, summary=exc.summary),
+        )
+        return
     except LLMError as exc:
         logger.warning(
             "ws.turn_failed",

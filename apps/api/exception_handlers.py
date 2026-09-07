@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
+from libs.confirmations import ConfirmationRequiredError
 from libs.core.exceptions import LLMBadRequestError, LLMError, LLMResponseError, LLMTransientError
+from libs.schemas.chat import ConfirmationRequiredResponse
 from libs.schemas.common import ErrorResponse
+
+CONFIRMATION_REQUIRED_STATUS_CODE = status.HTTP_202_ACCEPTED
 
 LLM_ERROR_STATUS_CODES: dict[type[LLMError], int] = {
     LLMTransientError: 503,
@@ -28,6 +32,16 @@ async def llm_error_handler(request: Request, exc: Exception) -> JSONResponse:
     )
 
 
+async def confirmation_required_handler(request: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, ConfirmationRequiredError)
+    payload = ConfirmationRequiredResponse(confirmation_id=exc.confirmation_id, summary=exc.summary)
+    return JSONResponse(
+        status_code=CONFIRMATION_REQUIRED_STATUS_CODE,
+        content=payload.model_dump(mode="json"),
+    )
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     for exc_type in LLM_ERROR_STATUS_CODES:
         app.add_exception_handler(exc_type, llm_error_handler)
+    app.add_exception_handler(ConfirmationRequiredError, confirmation_required_handler)

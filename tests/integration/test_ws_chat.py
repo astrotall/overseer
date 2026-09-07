@@ -9,19 +9,22 @@ from typing import Any
 import pytest
 from fastapi import FastAPI, status
 from fastapi.testclient import TestClient
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 from starlette.websockets import WebSocketDisconnect
 
-from apps.api.deps import get_active_llm_client
+from apps.api.deps import get_active_llm_client, get_confirmation_store
 from apps.api.routes.ws import _resolve_conversation_id
+from libs.confirmations import ConfirmationStore, PendingConfirmation
 from libs.core.exceptions import LLMTransientError
 from libs.db.models import Conversation, Message
 from libs.db.repositories import ConversationRepository
 from libs.db.session import get_session
-from libs.llm.base import ChatMessage, LLMClient, LLMResponse, ToolSpec
+from libs.llm.base import ChatMessage, LLMClient, LLMResponse, ToolCall, ToolSpec
 from libs.llm.system_prompt import get_system_prompt_message
+from libs.tools import Tool, ToolResult, get_tool_registry
 
 OK_RESPONSE = LLMResponse(model="fake-model", stop_reason="end_turn", text="готово")
 
@@ -51,6 +54,52 @@ class FakeLLMClient(LLMClient):
         return outcome
 
 
+class DangerousArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+
+
+class DangerousTool(Tool[DangerousArguments]):
+    name = "delete_file"
+    description = "Удаляет файл — необратимое действие, требует подтверждения."
+    arguments_model = DangerousArguments
+    requires_confirmation = True
+
+    def __init__(self) -> None:
+        self.executed = False
+
+    async def _execute(self, arguments: DangerousArguments) -> ToolResult:
+        self.executed = True
+        return ToolResult.ok(summary=f"Файл {arguments.path} удалён")
+
+
+class RecordingConfirmationStore(ConfirmationStore):
+    """Store без Redis: OVE-26 проверяет конверт транспорта, а не хранилище."""
+
+    def __init__(self) -> None:
+        self.pending: dict[uuid.UUID, PendingConfirmation] = {}
+
+    async def create_pending(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        summary: str,
+    ) -> uuid.UUID:
+        confirmation_id = uuid.uuid4()
+        self.pending[confirmation_id] = PendingConfirmation(
+            conversation_id=conversation_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            summary=summary,
+        )
+        return confirmation_id
+
+
 def _override_session(app: FastAPI, database_url: str) -> None:
     async def _get_session() -> AsyncIterator[AsyncSession]:
         engine = create_async_engine(database_url, poolclass=NullPool, future=True)
@@ -68,6 +117,13 @@ def _override_llm_client(app: FastAPI, llm_client: LLMClient) -> None:
         return llm_client
 
     app.dependency_overrides[get_active_llm_client] = _get_llm_client
+
+
+def _override_confirmation_store(app: FastAPI, store: ConfirmationStore) -> None:
+    def _get_confirmation_store() -> ConfirmationStore:
+        return store
+
+    app.dependency_overrides[get_confirmation_store] = _get_confirmation_store
 
 
 def _message(content: str) -> str:
@@ -302,3 +358,50 @@ async def test_resolve_conversation_id_without_explicit_id_releases_the_connecti
 
         assert resolved is not None
         assert not session.in_transaction()
+
+
+@pytest.mark.integration
+async def test_a_paused_turn_arrives_as_a_confirmation_required_envelope(
+    app: FastAPI, client: TestClient, db_engine: AsyncEngine, conversation_id: uuid.UUID
+) -> None:
+    """OVE-26: у паузы свой тип конверта, отличимый от `reply`; в базе после неё —
+    только сообщение пользователя, без оборванного tool_use."""
+    tool = DangerousTool()
+    get_tool_registry().register(tool)
+    store = RecordingConfirmationStore()
+    _override_confirmation_store(app, store)
+    call = ToolCall(id="call-1", name="delete_file", arguments={"path": "отчёт.docx"})
+    _override_llm_client(
+        app,
+        FakeLLMClient(
+            [
+                LLMResponse(
+                    model="fake-model",
+                    stop_reason="tool_use",
+                    text="сейчас удалю",
+                    tool_calls=[call],
+                )
+            ]
+        ),
+    )
+
+    frames = await asyncio.to_thread(
+        _exchange,
+        client,
+        f"/ws/chat?conversation_id={conversation_id}",
+        [_message("удали отчёт")],
+    )
+
+    (frame,) = frames
+    assert frame["type"] == "confirmation_required"
+    assert set(frame["payload"]) == {"confirmation_id", "summary"}
+    assert tool.executed is False
+
+    pending = store.pending[uuid.UUID(frame["payload"]["confirmation_id"])]
+    assert pending.conversation_id == conversation_id
+    assert pending.tool_call_id == "call-1"
+    assert frame["payload"]["summary"] == pending.summary
+
+    assert await _history(db_engine, conversation_id) == [
+        ChatMessage(role="user", content="удали отчёт")
+    ]

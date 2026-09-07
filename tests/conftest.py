@@ -19,7 +19,9 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
+from apps.api.deps import get_confirmation_store
 from apps.api.main import app as fastapi_app
+from libs.confirmations import ConfirmationStore
 from libs.core.config import Settings, get_settings
 from libs.db import models
 from libs.llm import ToolCall
@@ -130,9 +132,27 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
         await transaction.rollback()
 
 
+class UnreachableRedis:
+    """Заглушка Redis для приложения в тестах: до неё не должна доходить ни одна команда.
+
+    Тест, которому нужен настоящий store, подменяет `get_confirmation_store` сам."""
+
+    async def set(self, *args: object, **kwargs: object) -> None:
+        raise AssertionError("тест не ожидал обращения к Redis")
+
+    async def get(self, *args: object, **kwargs: object) -> None:
+        raise AssertionError("тест не ожидал обращения к Redis")
+
+    async def delete(self, *args: object, **kwargs: object) -> None:
+        raise AssertionError("тест не ожидал обращения к Redis")
+
+
 @pytest.fixture
 def app() -> Iterator[FastAPI]:
     init_tool_registry()
+    fastapi_app.dependency_overrides[get_confirmation_store] = lambda: ConfirmationStore(
+        UnreachableRedis()  # type: ignore[arg-type]  # заглушка вместо клиента Redis
+    )
     yield fastapi_app
     fastapi_app.dependency_overrides.clear()
     reset_tool_registry()
