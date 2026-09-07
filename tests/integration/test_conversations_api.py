@@ -4,16 +4,19 @@ import uuid
 from collections.abc import AsyncIterator, Sequence
 
 import pytest
+import structlog
 from fastapi import FastAPI
 from httpx import AsyncClient
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.deps import get_active_llm_client
 from libs.core.exceptions import LLMBadRequestError, LLMResponseError, LLMTransientError
 from libs.db.repositories import ConversationRepository
 from libs.db.session import get_session
-from libs.llm.base import ChatMessage, LLMClient, LLMResponse, ToolSpec
+from libs.llm.base import ChatMessage, LLMClient, LLMResponse, ToolCall, ToolSpec
 from libs.schemas.chat import MAX_MESSAGE_LENGTH
+from libs.tools import Tool, ToolResult, get_tool_registry
 
 
 class FakeLLMClient(LLMClient):
@@ -52,6 +55,43 @@ class FailingLLMClient(LLMClient):
         temperature: float | None = None,
     ) -> LLMResponse:
         raise self._exc
+
+
+class ScriptedLLMClient(LLMClient):
+    """Отдаёт на каждый вызов `complete()` следующий заскриптованный ответ по очереди."""
+
+    default_model = "fake-model"
+
+    def __init__(self, outcomes: Sequence[LLMResponse]) -> None:
+        self._outcomes = list(outcomes)
+
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float | None = None,
+    ) -> LLMResponse:
+        return self._outcomes.pop(0)
+
+
+class BoomArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: int
+
+
+class BoomTool(Tool[BoomArguments]):
+    """Инструмент для теста OVE-23: `_execute` всегда бросает исключение."""
+
+    name = "boom_http"
+    description = "Инструмент для проверки полного хода при падении инструмента внутри."
+    arguments_model = BoomArguments
+
+    async def _execute(self, arguments: BoomArguments) -> ToolResult:
+        raise RuntimeError("буум изнутри инструмента")
 
 
 def _override_session(app: FastAPI, db_session: AsyncSession) -> None:
@@ -195,3 +235,55 @@ async def test_llm_failures_map_to_http_status(
     )
 
     assert response.status_code == expected_status
+
+
+@pytest.mark.integration
+async def test_a_tool_that_raises_inside_a_full_http_turn_comes_back_as_a_reply(
+    app: FastAPI, async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """OVE-23: инструмент падает внутри настоящего request/response-цикла (не в изоляции
+    execute(), как в OVE-20, и не через echo-инструмент, как в OVE-22): HTTP-ответ обязан
+    остаться 200, а в базе — сохраниться корректный tool_result с ошибкой."""
+    _override_session(app, db_session)
+    get_tool_registry().register(BoomTool())
+    call = ToolCall(id="call-1", name="boom_http", arguments={"value": 1})
+    llm_client = ScriptedLLMClient(
+        [
+            LLMResponse(
+                model="fake-model",
+                stop_reason="tool_use",
+                text="сейчас попробую",
+                tool_calls=[call],
+            ),
+            LLMResponse(model="fake-model", stop_reason="end_turn", text="не получилось"),
+        ]
+    )
+    _override_llm_client(app, llm_client)
+    repository = ConversationRepository(db_session)
+    conversation_id = await repository.create_conversation()
+    await db_session.commit()
+
+    with structlog.testing.capture_logs([structlog.processors.format_exc_info]) as log_entries:
+        response = await async_client.post(
+            f"/conversations/{conversation_id}/messages", json={"content": "запусти boom_http"}
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"role": "assistant", "content": "не получилось"}
+
+    history = await repository.get_history(conversation_id)
+    assert [message.role for message in history] == ["user", "assistant", "tool", "assistant"]
+    tool_message = history[2]
+    assert tool_message.tool_call_id == "call-1"
+    assert tool_message.is_error is True
+    assert tool_message.content is not None
+    assert "boom_http" in tool_message.content
+    assert "буум изнутри инструмента" not in tool_message.content
+
+    failure_entries = [entry for entry in log_entries if entry["event"] == "tool.execution_failed"]
+    assert len(failure_entries) == 1
+    (failure_entry,) = failure_entries
+    assert failure_entry["log_level"] == "error"
+    assert failure_entry["tool"] == "boom_http"
+    assert "Traceback (most recent call last)" in failure_entry["exception"]
+    assert "RuntimeError: буум изнутри инструмента" in failure_entry["exception"]
