@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from typing import Any
 
 import pytest
 from redis.asyncio import Redis
 
 from libs.confirmations import ConfirmationStore, PendingConfirmation
+from libs.confirmations.store import _claim_key, _key
 from libs.core.exceptions import ConflictError, NotFoundError
 
 
@@ -105,6 +107,58 @@ async def test_only_one_of_many_simultaneous_claims_wins(redis_client: Redis) ->
     conflicts = [result for result in results if isinstance(result, ConflictError)]
     assert len(claimed) == 1
     assert len(conflicts) == 7
+
+    await store.resolve_pending(confirmation_id)
+
+
+@pytest.mark.integration
+async def test_a_record_that_expired_just_before_the_claim_is_not_found(
+    redis_client: Redis,
+) -> None:
+    store = ConfirmationStore(redis_client)
+    confirmation_id = await store.create_pending(
+        uuid.uuid4(),
+        tool_call_id="call-1",
+        tool_name="delete_file",
+        arguments={"path": "отчёт.docx"},
+        summary="Удалить файл отчёт.docx",
+    )
+
+    await redis_client.delete(_key(confirmation_id))
+
+    with pytest.raises(NotFoundError):
+        await store.claim_pending(confirmation_id)
+
+    assert await redis_client.exists(_claim_key(confirmation_id)) == 0
+
+
+@pytest.mark.integration
+async def test_the_claim_reads_and_locks_inside_one_redis_command(
+    redis_client: Redis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ConfirmationStore(redis_client)
+    confirmation_id = await store.create_pending(
+        uuid.uuid4(),
+        tool_call_id="call-1",
+        tool_name="echo",
+        arguments={"text": "hi"},
+        summary="Вызвать echo",
+    )
+
+    commands: list[str] = []
+    execute_command = redis_client.execute_command
+
+    async def spy(*args: Any, **kwargs: Any) -> Any:
+        commands.append(str(args[0]).upper())
+        return await execute_command(*args, **kwargs)
+
+    monkeypatch.setattr(redis_client, "execute_command", spy)
+    await store.claim_pending(confirmation_id)
+    monkeypatch.undo()
+
+    assert "EVALSHA" in commands
+    assert "GET" not in commands
+    assert "SET" not in commands
 
     await store.resolve_pending(confirmation_id)
 

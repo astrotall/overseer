@@ -54,7 +54,13 @@
 - `tests/integration/test_confirmation_store.py` — сам стор на живом Redis: круговой путь
   записи, TTL, `NotFoundError` на неизвестном id и захват (OVE-27) — восемь одновременных
   `claim_pending()` дают ровно один успех и семь `ConflictError`, а захват переживает снятую
-  им запись (после `resolve_pending()` тот же id — `NotFoundError`, а не `ConflictError`);
+  им запись (после `resolve_pending()` тот же id — `NotFoundError`, а не `ConflictError`).
+  Там же — атомарность самого захвата: запись, исчезнувшая перед вызовом, даёт `NotFoundError`
+  и **не оставляет ключа-захвата**, а `test_the_claim_reads_and_locks_inside_one_redis_command`
+  следит за командами, которые клиент шлёт во время `claim_pending()`: `GET` и `SET` там
+  запрещены, разрешён только `EVALSHA`. Второй тест — единственный, который краснеет на
+  возврате к двум последовательным командам: гонку «запись истекла ровно между чтением и
+  захватом» по времени не воспроизвести надёжно, поэтому проверяется механизм, а не удача;
 - `tests/integration/test_confirmations_api.py` — те же исходы через HTTP:
   `POST /confirmations/{id}/confirm` и `/reject` отдают обычный `MessageResponse` (200),
   неизвестный или уже разрешённый id — 404, захваченный другим запросом — 409, а продолжение,
