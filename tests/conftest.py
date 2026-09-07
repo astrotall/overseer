@@ -6,6 +6,8 @@ from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from redis.asyncio import Redis, from_url
+from redis.exceptions import RedisError
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
@@ -56,6 +58,21 @@ async def db_engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
 
     yield engine
     await engine.dispose()
+
+
+@pytest.fixture(scope="session")
+async def redis_client(settings: Settings) -> AsyncIterator[Redis]:
+    client: Redis = from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+    try:
+        await client.ping()
+    except RedisError as exc:
+        await client.aclose()
+        if os.getenv("CI"):
+            raise
+        pytest.skip(f"Redis недоступен ({settings.redis_url}): {exc}")
+
+    yield client
+    await client.aclose()
 
 
 @pytest.fixture
