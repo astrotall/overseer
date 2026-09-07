@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis.asyncio import Redis, from_url
-from redis.exceptions import RedisError
+from redis.exceptions import RedisError, ResponseError
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
@@ -75,11 +75,36 @@ async def db_engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
     await engine.dispose()
 
 
+CLUSTER_MODE_SELECT_ERROR_MARKER = "SELECT is not allowed in cluster mode"
+
+
+class RedisClusterModeNotSupportedError(RuntimeError):
+    """Raised when the derived test database can't be selected because Redis runs in
+    cluster mode (or another setup that only supports logical database 0)."""
+
+
+def _raise_if_cluster_mode_select_error(exc: ResponseError, *, redis_url_test: str | None) -> None:
+    if redis_url_test:
+        return
+    if CLUSTER_MODE_SELECT_ERROR_MARKER not in str(exc):
+        return
+    raise RedisClusterModeNotSupportedError(
+        "REDIS_URL_TEST must be set explicitly - the configured Redis does not support "
+        "multiple logical databases (cluster mode)"
+    ) from exc
+
+
 @pytest.fixture(scope="session")
-async def redis_client(test_redis_url: str) -> AsyncIterator[Redis]:
+async def redis_client(test_redis_url: str, settings: Settings) -> AsyncIterator[Redis]:
     client: Redis = from_url(test_redis_url, encoding="utf-8", decode_responses=True)
     try:
         await client.ping()
+    except ResponseError as exc:
+        await client.aclose()
+        _raise_if_cluster_mode_select_error(exc, redis_url_test=settings.redis_url_test)
+        if os.getenv("CI"):
+            raise
+        pytest.skip(f"Redis недоступен ({test_redis_url}): {exc}")
     except RedisError as exc:
         await client.aclose()
         if os.getenv("CI"):
