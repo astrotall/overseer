@@ -34,6 +34,20 @@
   транспортов на ту же паузу (`202` с `confirmation_id` и `summary` у REST, конверт
   `confirmation_required` у WS) проверяют `test_conversations_api.py` и `test_ws_chat.py`
   со стором-двойником без Redis: там проверяется транспорт, а не хранилище;
+- `tests/integration/test_confirmation_resume.py` — возобновление хода (OVE-27) на живых
+  PostgreSQL и Redis: подтверждение исполняет инструмент и доводит ход до ответа;
+  продолжение может само позвать ещё один инструмент и может упереться в **ещё одну** паузу
+  (возобновление не одноразовое, первый pending при этом уже снят); отказ не исполняет
+  инструмент вовсе и уезжает модели как `tool_result` с `is_error=True`; повторное
+  разрешение того же `confirmation_id` и неизвестный id — `NotFoundError`, а не тихий no-op.
+  Там же — параметризованный по `history_limit` тест среза истории **у настоящего
+  потребителя**: то, что уходит в LLM на продолжении, начинается с `role="user"` и не
+  содержит непарных `tool_use` / `tool_result`. До OVE-27 это поведение
+  `cut_to_turn_boundary()` на возобновлённом ходе только предполагалось;
+- `tests/integration/test_confirmations_api.py` — те же исходы через HTTP:
+  `POST /confirmations/{id}/confirm` и `/reject` отдают обычный `MessageResponse` (200),
+  неизвестный или уже разрешённый id — 404, а продолжение, упёршееся в новое подтверждение,
+  — 202 с новым `confirmation_id`;
 - `tests/unit/` — юнит-тесты бизнес-логики: конфиг, LLM-клиенты и фабрика, контракт
   `libs/llm/base.py`, протокол инструмента `libs/tools/base.py` (`test_tool_protocol.py`:
   прямой вызов `EchoTool`, построение `ToolSpec`, ошибки аргументов и исключение внутри

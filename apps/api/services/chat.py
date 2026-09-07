@@ -78,12 +78,54 @@ class ChatService:
         self._max_tool_rounds = max_tool_rounds
 
     async def send_message(self, conversation_id: uuid.UUID, text: str) -> ChatMessage:
-        try:
+        async def turn() -> ChatMessage:
             await self._repository.append_message(
                 conversation_id, ChatMessage(role="user", content=text)
             )
             history = await self._load_history(conversation_id)
-            answer = await self._run_turn(conversation_id, history)
+            return await self._run_turn(conversation_id, history)
+
+        return await self._commit_turn(conversation_id, turn)
+
+    async def continue_turn(self, conversation_id: uuid.UUID) -> ChatMessage:
+        async def turn() -> ChatMessage:
+            history = await self._load_history(conversation_id)
+            return await self._run_turn(conversation_id, history)
+
+        return await self._commit_turn(conversation_id, turn)
+
+    async def execute_confirmed_call(
+        self, conversation_id: uuid.UUID, call: ToolCall
+    ) -> ToolResult:
+        tool = self._lookup(conversation_id, call)
+        return await self._execute(conversation_id, tool, call)
+
+    async def persist_resumed_round(
+        self, conversation_id: uuid.UUID, call: ToolCall, result: ToolResult
+    ) -> None:
+        try:
+            await self._repository.append_message(
+                conversation_id, ChatMessage(role="assistant", tool_calls=[call])
+            )
+            await self._repository.append_message(conversation_id, _to_tool_message(call, result))
+            await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            raise
+
+        logger.info(
+            "chat.resumed_round_persisted",
+            conversation_id=str(conversation_id),
+            tool=call.name,
+            tool_call_id=call.id,
+            status=result.status,
+        )
+
+    async def _commit_turn(
+        self, conversation_id: uuid.UUID, turn: Callable[[], Awaitable[ChatMessage]]
+    ) -> ChatMessage:
+        try:
+            answer = await turn()
             await self._session.commit()
             return answer
         except ConfirmationRequiredError as exc:
@@ -186,7 +228,8 @@ class ChatService:
         return results
 
     def _lookup(self, conversation_id: uuid.UUID, call: ToolCall) -> Tool[Any] | None:
-        assert self._tool_registry is not None
+        if self._tool_registry is None:
+            return None
 
         try:
             return self._tool_registry.get(call.name)
