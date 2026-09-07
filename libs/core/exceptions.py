@@ -17,6 +17,10 @@ class NotFoundError(OverseerError):
     default_message = "Ресурс не найден"
 
 
+class ConflictError(OverseerError):
+    default_message = "Конфликт состояния: ресурс уже обрабатывается"
+
+
 class ExternalServiceError(OverseerError):
     default_message = "Ошибка внешнего сервиса"
 

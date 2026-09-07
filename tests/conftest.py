@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
@@ -145,6 +145,12 @@ class UnreachableRedis:
 
     async def delete(self, *args: object, **kwargs: object) -> None:
         raise AssertionError("тест не ожидал обращения к Redis")
+
+    def register_script(self, script: str | bytes) -> Callable[..., Awaitable[None]]:
+        async def unreachable(*args: object, **kwargs: object) -> None:
+            raise AssertionError("тест не ожидал обращения к Redis")
+
+        return unreachable
 
 
 @pytest.fixture

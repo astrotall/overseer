@@ -320,7 +320,10 @@ job; we do not merge a red CI.
   requires confirmation now pauses the turn instead of running: the pending action is
   stored in Redis and both transports report it distinctly (`202` with a
   `confirmation_id` over REST, a `confirmation_required` envelope over the WebSocket).
-  Answering that request — the endpoint that resumes the turn — is not implemented yet;
+  The user answers over REST — `POST /confirmations/{id}/confirm` or `/reject` — and the
+  paused turn resumes from there: the tool runs (or is skipped on a rejection), the round
+  is persisted as a matching `tool_use` + `tool_result` pair, and the model is asked for
+  the rest of the turn. There is no WebSocket envelope for answering yet;
 - ⏳ `apps/executor` (COM/Playwright) — an empty package with a README;
 - ✅ `apps/voice` — the loop is closed (OVE-45 … OVE-48): capture through `sounddevice`,
   openWakeWord detection and utterance capture in a worker thread, energy-based

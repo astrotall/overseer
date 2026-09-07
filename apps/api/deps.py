@@ -6,7 +6,7 @@ from fastapi import Depends
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.api.services import ChatService, PendingConfirmationHandler
+from apps.api.services import ChatService, ConfirmationService, PendingConfirmationHandler
 from libs.confirmations import ConfirmationStore
 from libs.core.config import Settings, get_settings
 from libs.db.redis import get_redis
@@ -53,6 +53,15 @@ def get_chat_service(
 ChatServiceDep = Annotated[ChatService, Depends(get_chat_service)]
 
 
+def get_confirmation_service(
+    confirmation_store: ConfirmationStoreDep, chat_service: ChatServiceDep
+) -> ConfirmationService:
+    return ConfirmationService(confirmation_store, chat_service)
+
+
+ConfirmationServiceDep = Annotated[ConfirmationService, Depends(get_confirmation_service)]
+
+
 def get_conversation_repository(session: SessionDep) -> ConversationRepository:
     return ConversationRepository(session)
 
@@ -61,6 +70,7 @@ ConversationRepositoryDep = Annotated[ConversationRepository, Depends(get_conver
 
 __all__ = [
     "ChatServiceDep",
+    "ConfirmationServiceDep",
     "ConfirmationStoreDep",
     "ConversationRepositoryDep",
     "LLMClientDep",
@@ -70,6 +80,7 @@ __all__ = [
     "ToolRegistryDep",
     "get_active_llm_client",
     "get_chat_service",
+    "get_confirmation_service",
     "get_confirmation_store",
     "get_conversation_repository",
 ]
