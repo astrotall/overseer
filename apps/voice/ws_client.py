@@ -18,7 +18,12 @@ from apps.voice.pipeline import Transcript
 from apps.voice.state import ConnectionGate, VoiceState, VoiceStateMachine
 from libs.core.logging import get_logger
 from libs.schemas.chat import SendMessageRequest
-from libs.schemas.ws import WSIncomingMessage, WSReplyMessage, WSServerMessage
+from libs.schemas.ws import (
+    WSConfirmationRequiredMessage,
+    WSIncomingMessage,
+    WSReplyMessage,
+    WSServerMessage,
+)
 
 logger = get_logger(__name__)
 
@@ -26,6 +31,9 @@ RECONNECT_INITIAL_S: Final[float] = 1.0
 RECONNECT_MAX_S: Final[float] = 30.0
 BACKOFF_FACTOR: Final[float] = 2.0
 ERROR_SPEECH: Final[str] = "Не удалось получить ответ от агента."
+CONFIRMATION_SPEECH: Final[str] = (
+    "Это действие требует подтверждения, а подтвердить его голосом пока нельзя."
+)
 TRANSPORT_ERRORS: Final[tuple[type[Exception], ...]] = (OSError, TimeoutError, WebSocketException)
 
 SERVER_MESSAGE: Final[TypeAdapter[WSServerMessage]] = TypeAdapter(WSServerMessage)
@@ -246,6 +254,13 @@ class VoiceWSClient:
         try:
             if isinstance(message, WSReplyMessage):
                 await self._speak_reply(message.payload.role, message.payload.content)
+            elif isinstance(message, WSConfirmationRequiredMessage):
+                logger.warning(
+                    "voice.ws_confirmation_required",
+                    epoch=self._epoch,
+                    confirmation_id=str(message.payload.confirmation_id),
+                )
+                await self._speaker.speak(CONFIRMATION_SPEECH)
             else:
                 logger.warning(
                     "voice.ws_error",

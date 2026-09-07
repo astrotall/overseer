@@ -316,8 +316,11 @@ job; we do not merge a red CI.
 - ⏳ LLM clients — interfaces only, generation is not implemented;
 - ⏳ tool calling — the tool protocol (`libs/tools/base.py`), the registry
   (`libs/tools/registry.py`) and the dispatch loop inside `ChatService` are in place;
-  no real tool exists yet — only the reference `EchoTool`, and confirmation of
-  irreversible actions is still a seam with a placeholder default;
+  no real tool exists yet — only the reference `EchoTool`. A call to a tool that
+  requires confirmation now pauses the turn instead of running: the pending action is
+  stored in Redis and both transports report it distinctly (`202` with a
+  `confirmation_id` over REST, a `confirmation_required` envelope over the WebSocket).
+  Answering that request — the endpoint that resumes the turn — is not implemented yet;
 - ⏳ `apps/executor` (COM/Playwright) — an empty package with a README;
 - ✅ `apps/voice` — the loop is closed (OVE-45 … OVE-48): capture through `sounddevice`,
   openWakeWord detection and utterance capture in a worker thread, energy-based

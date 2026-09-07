@@ -558,7 +558,9 @@ async def test_the_confirmation_seam_can_be_replaced_without_touching_the_dispat
     tool = DangerousTool()
     asked: list[str] = []
 
-    async def ask_the_user(pending: Tool[Any], pending_call: ToolCall) -> ToolResult:
+    async def ask_the_user(
+        pending_conversation_id: uuid.UUID, pending: Tool[Any], pending_call: ToolCall
+    ) -> ToolResult:
         asked.append(pending.name)
         return ToolResult.ok(summary="Запрошено подтверждение", data={"call_id": pending_call.id})
 

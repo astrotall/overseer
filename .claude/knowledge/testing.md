@@ -21,6 +21,14 @@
   отдельно, а не считается корректной по построению; парность вызовов и результатов
   пришпилена в общем хелпере `_assert_history_is_well_formed`, и без этого решения тест
   краснеет на срезах, задевающих такой ход;
+- `tests/integration/test_chat_confirmation.py` — пауза хода на инструменте с
+  `requires_confirmation=True` (OVE-26) на живых PostgreSQL и Redis: инструмент не
+  исполняется, `PendingConfirmation` создаётся с тем же `tool_call_id`, что у модели, а в
+  базе после паузы остаётся только сообщение пользователя — и, если раунд инструментов до
+  паузы успел закончиться, его `tool_use` и `tool_result` целой парой. Форму ответа обоих
+  транспортов на ту же паузу (`202` с `confirmation_id` и `summary` у REST, конверт
+  `confirmation_required` у WS) проверяют `test_conversations_api.py` и `test_ws_chat.py`
+  со стором-двойником без Redis: там проверяется транспорт, а не хранилище;
 - `tests/unit/` — юнит-тесты бизнес-логики: конфиг, LLM-клиенты и фабрика, контракт
   `libs/llm/base.py`, протокол инструмента `libs/tools/base.py` (`test_tool_protocol.py`:
   прямой вызов `EchoTool`, построение `ToolSpec`, ошибки аргументов и исключение внутри

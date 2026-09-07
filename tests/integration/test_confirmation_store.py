@@ -17,9 +17,10 @@ async def test_create_and_get_pending_round_trips_the_stored_data(redis_client: 
 
     confirmation_id = await store.create_pending(
         conversation_id,
-        "delete_file",
-        {"path": "C:\\Users\\ivan\\report.docx"},
-        "Удалить файл report.docx",
+        tool_call_id="call-1",
+        tool_name="delete_file",
+        arguments={"path": "C:\\Users\\ivan\\report.docx"},
+        summary="Удалить файл report.docx",
     )
 
     assert isinstance(confirmation_id, uuid.UUID)
@@ -28,6 +29,7 @@ async def test_create_and_get_pending_round_trips_the_stored_data(redis_client: 
 
     assert pending == PendingConfirmation(
         conversation_id=conversation_id,
+        tool_call_id="call-1",
         tool_name="delete_file",
         arguments={"path": "C:\\Users\\ivan\\report.docx"},
         summary="Удалить файл report.docx",
@@ -46,7 +48,11 @@ async def test_get_pending_with_unknown_id_raises_not_found(redis_client: Redis)
 async def test_resolve_pending_deletes_the_record(redis_client: Redis) -> None:
     store = ConfirmationStore(redis_client)
     confirmation_id = await store.create_pending(
-        uuid.uuid4(), "echo", {"text": "hi"}, "Вызвать echo"
+        uuid.uuid4(),
+        tool_call_id="call-1",
+        tool_name="echo",
+        arguments={"text": "hi"},
+        summary="Вызвать echo",
     )
 
     await store.resolve_pending(confirmation_id)
@@ -66,7 +72,11 @@ async def test_resolve_pending_on_unknown_id_does_not_raise(redis_client: Redis)
 async def test_pending_confirmation_expires_after_its_ttl(redis_client: Redis) -> None:
     store = ConfirmationStore(redis_client, ttl_seconds=1)
     confirmation_id = await store.create_pending(
-        uuid.uuid4(), "echo", {"text": "hi"}, "Вызвать echo"
+        uuid.uuid4(),
+        tool_call_id="call-1",
+        tool_name="echo",
+        arguments={"text": "hi"},
+        summary="Вызвать echo",
     )
 
     await asyncio.sleep(1.5)

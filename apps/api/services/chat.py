@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from libs.confirmations import ConfirmationRequiredError
 from libs.core.exceptions import NotFoundError
 from libs.core.logging import get_logger
 from libs.db.repositories import ConversationRepository
@@ -23,10 +24,12 @@ TOOL_ROUNDS_EXHAUSTED_TEXT = (
     "Сформулируйте задачу точнее или разбейте её на шаги."
 )
 
-ConfirmationHandler = Callable[[Tool[Any], ToolCall], Awaitable[ToolResult]]
+ConfirmationHandler = Callable[[uuid.UUID, Tool[Any], ToolCall], Awaitable[ToolResult]]
 
 
-async def confirmation_is_unavailable(tool: Tool[Any], call: ToolCall) -> ToolResult:
+async def confirmation_is_unavailable(
+    conversation_id: uuid.UUID, tool: Tool[Any], call: ToolCall
+) -> ToolResult:
     return ToolResult.failed(
         f"Инструмент {tool.name} требует подтверждения пользователя, а механизм подтверждения "
         "ещё не реализован: вызов не выполнен. Скажи об этом пользователю и предложи путь "
@@ -83,6 +86,14 @@ class ChatService:
             answer = await self._run_turn(conversation_id, history)
             await self._session.commit()
             return answer
+        except ConfirmationRequiredError as exc:
+            await self._session.commit()
+            logger.info(
+                "chat.turn_paused_for_confirmation",
+                conversation_id=str(conversation_id),
+                confirmation_id=str(exc.confirmation_id),
+            )
+            raise
         except Exception:
             await self._session.rollback()
             raise
@@ -146,11 +157,14 @@ class ChatService:
         response: LLMResponse,
     ) -> None:
         requested = response.to_message()
+        results: list[tuple[ToolCall, ToolResult]] = []
+        for call in response.tool_calls:
+            results.append((call, await self._invoke(conversation_id, call)))
+
         await self._repository.append_message(conversation_id, requested)
         conversation.append(requested)
 
-        for call in response.tool_calls:
-            result = await self._invoke(conversation_id, call)
+        for call, result in results:
             tool_message = _to_tool_message(call, result)
             await self._repository.append_message(conversation_id, tool_message)
             conversation.append(tool_message)
@@ -177,7 +191,7 @@ class ChatService:
                 tool=tool.name,
                 tool_call_id=call.id,
             )
-            result = await self._confirmation_handler(tool, call)
+            result = await self._confirmation_handler(conversation_id, tool, call)
         else:
             result = await tool.execute(call.arguments)
 

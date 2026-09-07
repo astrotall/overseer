@@ -13,6 +13,7 @@ from structlog.typing import EventDict
 from libs.core.exceptions import ConfigurationError
 from libs.llm import ToolCall, ToolSpec
 from libs.tools import EchoArguments, EchoTool, Tool, ToolResult
+from libs.tools.base import MAX_DESCRIBED_ARGUMENTS_CHARS
 
 
 class BoomArguments(BaseModel):
@@ -251,3 +252,42 @@ def test_a_failure_speaks_with_its_error_text_unless_given_a_summary() -> None:
     assert ToolResult.failed("WinError 32", summary="Не смог сохранить документ").summary == (
         "Не смог сохранить документ"
     )
+
+
+class NamedTool(Tool[EchoArguments]):
+    name = "named"
+    description = "Инструмент, который сам объясняет свой вызов."
+    arguments_model = EchoArguments
+    requires_confirmation = True
+
+    def describe_call(self, arguments: dict[str, Any]) -> str:
+        return f"Сказать вслух «{arguments['text']}»"
+
+    async def _execute(self, arguments: EchoArguments) -> ToolResult:
+        return ToolResult.ok(summary=arguments.text)
+
+
+def test_a_call_describes_itself_by_the_tool_description_and_its_arguments() -> None:
+    summary = EchoTool().describe_call({"text": "собери отчёт"})
+
+    assert EchoTool.description in summary
+    assert "echo" in summary
+    assert "собери отчёт" in summary
+
+
+def test_a_tool_may_describe_a_call_in_its_own_words() -> None:
+    assert NamedTool().describe_call({"text": "готово"}) == "Сказать вслух «готово»"
+
+
+def test_a_call_without_arguments_is_still_described() -> None:
+    summary = EchoTool().describe_call({})
+
+    assert EchoTool.description in summary
+    assert "echo()" in summary
+
+
+def test_huge_arguments_do_not_grow_the_description_without_bound() -> None:
+    summary = EchoTool().describe_call({"text": "я" * 10_000})
+
+    assert len(summary) < len(EchoTool.description) + MAX_DESCRIBED_ARGUMENTS_CHARS + 100
+    assert summary.endswith("…)")
