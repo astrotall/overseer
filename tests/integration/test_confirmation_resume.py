@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Sequence
 from typing import Any
@@ -7,11 +8,13 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict
 from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from apps.api.services import ChatService, ConfirmationService, PendingConfirmationHandler
 from libs.confirmations import ConfirmationRequiredError, ConfirmationStore
-from libs.core.exceptions import NotFoundError
+from libs.core.exceptions import ConflictError, NotFoundError
+from libs.db.models import Conversation, Message
 from libs.db.repositories import ConversationRepository
 from libs.llm.base import ChatMessage, LLMClient, LLMResponse, ToolCall, ToolSpec
 from libs.tools import EchoTool, Tool, ToolRegistry, ToolResult
@@ -330,3 +333,46 @@ async def test_the_resumed_history_slice_never_starts_mid_turn(
         "tool",
         "assistant",
     ]
+
+
+@pytest.mark.integration
+async def test_two_simultaneous_confirmations_run_the_tool_exactly_once(
+    db_engine: AsyncEngine, redis_client: Redis
+) -> None:
+    store = ConfirmationStore(redis_client)
+    tool = DangerousTool()
+
+    async with AsyncSession(db_engine, expire_on_commit=False) as setup_session:
+        conversation_id, confirmation_id = await _pause_on_delete(setup_session, store, tool)
+
+    async def _confirm_via_own_session() -> ChatMessage:
+        async with AsyncSession(db_engine, expire_on_commit=False) as session:
+            chat_service = _service(
+                session, ScriptedLLMClient([_final("Файл удалён.")]), store, tool
+            )
+            return await ConfirmationService(store, chat_service).confirm(confirmation_id)
+
+    try:
+        results = await asyncio.gather(
+            _confirm_via_own_session(),
+            _confirm_via_own_session(),
+            return_exceptions=True,
+        )
+
+        assert tool.deleted == ["отчёт.docx"]
+        answers = [result for result in results if isinstance(result, ChatMessage)]
+        conflicts = [result for result in results if isinstance(result, ConflictError)]
+        assert answers == [ChatMessage(role="assistant", content="Файл удалён.")]
+        assert len(conflicts) == 1
+
+        async with AsyncSession(db_engine, expire_on_commit=False) as reader:
+            history = await ConversationRepository(reader).get_history(conversation_id)
+        assert [message.role for message in history] == ["user", "assistant", "tool", "assistant"]
+        _assert_history_is_well_formed(history)
+    finally:
+        await store.resolve_pending(confirmation_id)
+        async with db_engine.begin() as connection:
+            await connection.execute(
+                delete(Message).where(Message.conversation_id == conversation_id)
+            )
+            await connection.execute(delete(Conversation).where(Conversation.id == conversation_id))

@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, status
 
 from apps.api.deps import ConfirmationServiceDep
 from apps.api.exception_handlers import CONFIRMATION_REQUIRED_STATUS_CODE
-from libs.core.exceptions import NotFoundError
+from libs.core.exceptions import ConflictError, NotFoundError
 from libs.llm.base import ChatMessage
 from libs.schemas.chat import ConfirmationRequiredResponse, MessageResponse
 
@@ -16,6 +16,9 @@ router = APIRouter(prefix="/confirmations", tags=["chat"])
 _RESUME_RESPONSES: dict[int | str, dict[str, Any]] = {
     status.HTTP_404_NOT_FOUND: {
         "description": "Подтверждение не найдено, истекло или уже разрешено",
+    },
+    status.HTTP_409_CONFLICT: {
+        "description": "Подтверждение уже обрабатывается другим запросом",
     },
     CONFIRMATION_REQUIRED_STATUS_CODE: {
         "model": ConfirmationRequiredResponse,
@@ -62,3 +65,5 @@ async def _resolve(
         return await confirmation_service.reject(confirmation_id)
     except NotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message) from exc
+    except ConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.message) from exc

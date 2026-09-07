@@ -6,11 +6,12 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 from redis.asyncio import Redis
 
-from libs.core.exceptions import NotFoundError
+from libs.core.exceptions import ConflictError, NotFoundError
 
 DEFAULT_TTL_SECONDS = 10 * 60
 
 _KEY_PREFIX = "overseer:confirmation:pending:"
+_CLAIM_PREFIX = "overseer:confirmation:claim:"
 
 
 class PendingConfirmation(BaseModel):
@@ -58,9 +59,24 @@ class ConfirmationStore:
             raise NotFoundError(f"Подтверждение '{confirmation_id}' не найдено или истекло")
         return PendingConfirmation.model_validate_json(raw)
 
+    async def claim_pending(self, confirmation_id: uuid.UUID) -> PendingConfirmation:
+        pending = await self.get_pending(confirmation_id)
+        claimed = await self._redis.set(
+            _claim_key(confirmation_id), "1", nx=True, ex=self._ttl_seconds
+        )
+        if not claimed:
+            raise ConflictError(
+                f"Подтверждение '{confirmation_id}' уже обрабатывается другим запросом"
+            )
+        return pending
+
     async def resolve_pending(self, confirmation_id: uuid.UUID) -> None:
         await self._redis.delete(_key(confirmation_id))
 
 
 def _key(confirmation_id: uuid.UUID) -> str:
     return f"{_KEY_PREFIX}{confirmation_id}"
+
+
+def _claim_key(confirmation_id: uuid.UUID) -> str:
+    return f"{_CLAIM_PREFIX}{confirmation_id}"

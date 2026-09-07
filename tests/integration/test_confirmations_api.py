@@ -180,6 +180,7 @@ async def test_an_unknown_confirmation_answers_404(
     app: FastAPI, async_client: AsyncClient, db_session: AsyncSession, redis_client: Redis
 ) -> None:
     _override_session(app, db_session)
+    _override_llm_client(app, ScriptedLLMClient([]))
     _override_confirmation_store(app, ConfirmationStore(redis_client))
 
     response = await async_client.post(f"/confirmations/{uuid.uuid4()}/reject")
@@ -245,3 +246,21 @@ async def test_the_continuation_may_call_an_ordinary_tool_over_http(
         "assistant",
     ]
     assert [message.tool_call_id for message in (history[2], history[4])] == ["call-1", "call-2"]
+
+
+@pytest.mark.integration
+async def test_a_confirmation_already_being_resolved_answers_409(
+    app: FastAPI, async_client: AsyncClient, db_session: AsyncSession, redis_client: Redis
+) -> None:
+    store = ConfirmationStore(redis_client)
+    _override_confirmation_store(app, store)
+    tool = DangerousTool()
+    _, confirmation_id = await _pause_on_delete(
+        app, async_client, db_session, [_final("Файл удалён.")], tool
+    )
+    await store.claim_pending(confirmation_id)
+
+    response = await async_client.post(f"/confirmations/{confirmation_id}/confirm")
+
+    assert response.status_code == 409
+    assert tool.deleted == []

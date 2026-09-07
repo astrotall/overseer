@@ -44,12 +44,6 @@ REJECTED_BY_USER_TEXT = (
 
 
 class ConfirmationService:
-    """Возобновление хода, приостановленного на подтверждении (OVE-27).
-
-    Порядок шагов важен и вынесен сюда целиком, а не спрятан в `ChatService`:
-    инструмент исполняется, раунд коммитится, и только после этого `PendingConfirmation`
-    удаляется из стора — сбой персиста оставляет ожидающее подтверждение на месте."""
-
     def __init__(self, store: ConfirmationStore, chat_service: ChatService) -> None:
         self._store = store
         self._chat_service = chat_service
@@ -61,7 +55,7 @@ class ConfirmationService:
         return await self._resume(confirmation_id, approved=False)
 
     async def _resume(self, confirmation_id: uuid.UUID, *, approved: bool) -> ChatMessage:
-        pending = await self._store.get_pending(confirmation_id)
+        pending = await self._store.claim_pending(confirmation_id)
         call = ToolCall(
             id=pending.tool_call_id, name=pending.tool_name, arguments=pending.arguments
         )

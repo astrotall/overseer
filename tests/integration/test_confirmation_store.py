@@ -7,7 +7,7 @@ import pytest
 from redis.asyncio import Redis
 
 from libs.confirmations import ConfirmationStore, PendingConfirmation
-from libs.core.exceptions import NotFoundError
+from libs.core.exceptions import ConflictError, NotFoundError
 
 
 @pytest.mark.integration
@@ -83,3 +83,44 @@ async def test_pending_confirmation_expires_after_its_ttl(redis_client: Redis) -
 
     with pytest.raises(NotFoundError):
         await store.get_pending(confirmation_id)
+
+
+@pytest.mark.integration
+async def test_only_one_of_many_simultaneous_claims_wins(redis_client: Redis) -> None:
+    store = ConfirmationStore(redis_client)
+    confirmation_id = await store.create_pending(
+        uuid.uuid4(),
+        tool_call_id="call-1",
+        tool_name="delete_file",
+        arguments={"path": "отчёт.docx"},
+        summary="Удалить файл отчёт.docx",
+    )
+
+    results = await asyncio.gather(
+        *(store.claim_pending(confirmation_id) for _ in range(8)),
+        return_exceptions=True,
+    )
+
+    claimed = [result for result in results if isinstance(result, PendingConfirmation)]
+    conflicts = [result for result in results if isinstance(result, ConflictError)]
+    assert len(claimed) == 1
+    assert len(conflicts) == 7
+
+    await store.resolve_pending(confirmation_id)
+
+
+@pytest.mark.integration
+async def test_a_claim_outlives_the_pending_record_it_guards(redis_client: Redis) -> None:
+    store = ConfirmationStore(redis_client)
+    confirmation_id = await store.create_pending(
+        uuid.uuid4(),
+        tool_call_id="call-1",
+        tool_name="echo",
+        arguments={"text": "hi"},
+        summary="Вызвать echo",
+    )
+    await store.claim_pending(confirmation_id)
+    await store.resolve_pending(confirmation_id)
+
+    with pytest.raises(NotFoundError):
+        await store.claim_pending(confirmation_id)
