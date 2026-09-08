@@ -13,11 +13,18 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
 from apps.voice.config import VoiceSettings
+from apps.voice.confirmations import (
+    ConfirmationAPI,
+    ConfirmationError,
+    ConfirmationGoneError,
+    Decision,
+    classify,
+)
 from apps.voice.listener import UNSET_EPOCH
 from apps.voice.pipeline import Transcript
 from apps.voice.state import ConnectionGate, VoiceState, VoiceStateMachine
 from libs.core.logging import get_logger
-from libs.schemas.chat import SendMessageRequest
+from libs.schemas.chat import ConfirmationRequiredResponse, SendMessageRequest
 from libs.schemas.ws import (
     WSConfirmationRequiredMessage,
     WSIncomingMessage,
@@ -34,6 +41,15 @@ ERROR_SPEECH: Final[str] = "Не удалось получить ответ от
 CONFIRMATION_SPEECH: Final[str] = (
     "Это действие требует подтверждения, а подтвердить его голосом пока нельзя."
 )
+CONFIRMATION_QUESTION: Final[str] = "{summary} Подтверждаете?"
+CONFIRMATION_RETRY: Final[str] = "Не расслышал. Скажите «да» или «нет»."
+CONFIRMATION_GAVE_UP_SPEECH: Final[str] = "Так и не понял ответ. Отменяю действие."
+CONFIRMATION_FAILED_SPEECH: Final[str] = "Не удалось передать ваш ответ агенту."
+CONFIRMATION_GONE_SPEECH: Final[str] = "Подтверждение больше не действует."
+CONFIRMATION_CHAIN_SPEECH: Final[str] = "Слишком много подтверждений подряд, останавливаюсь."
+CONFIRMATION_ATTEMPTS: Final[int] = 2
+CONFIRMATION_CHAIN_LIMIT: Final[int] = 5
+ANSWER_TIMEOUT_S: Final[float] = 45.0
 TRANSPORT_ERRORS: Final[tuple[type[Exception], ...]] = (OSError, TimeoutError, WebSocketException)
 
 SERVER_MESSAGE: Final[TypeAdapter[WSServerMessage]] = TypeAdapter(WSServerMessage)
@@ -41,6 +57,13 @@ SERVER_MESSAGE: Final[TypeAdapter[WSServerMessage]] = TypeAdapter(WSServerMessag
 
 class Speaker(Protocol):
     async def speak(self, text: str) -> bool: ...
+
+
+ListenRequest = Callable[[], bool]
+
+
+def listening_unavailable() -> bool:
+    return False
 
 
 class WSConnection(Protocol):
@@ -90,6 +113,9 @@ class VoiceWSClient:
         connector: Connector = websocket_connector,
         reconnect_initial_s: float = RECONNECT_INITIAL_S,
         reconnect_max_s: float = RECONNECT_MAX_S,
+        confirmations: ConfirmationAPI | None = None,
+        listen: ListenRequest = listening_unavailable,
+        answer_timeout_s: float = ANSWER_TIMEOUT_S,
     ) -> None:
         if reconnect_initial_s <= 0.0:
             raise ValueError(f"reconnect_initial_s must be positive, got {reconnect_initial_s}")
@@ -98,6 +124,8 @@ class VoiceWSClient:
                 f"reconnect_max_s must not be below reconnect_initial_s, got "
                 f"{reconnect_max_s} < {reconnect_initial_s}"
             )
+        if answer_timeout_s <= 0.0:
+            raise ValueError(f"answer_timeout_s must be positive, got {answer_timeout_s}")
 
         self._url = build_url(url, conversation_id)
         self._transcripts = transcripts
@@ -107,8 +135,13 @@ class VoiceWSClient:
         self._connector = connector
         self._reconnect_initial_s = reconnect_initial_s
         self._reconnect_max_s = reconnect_max_s
+        self._confirmations = confirmations
+        self._listen = listen
+        self._answer_timeout_s = answer_timeout_s
         self._epoch = UNSET_EPOCH
         self._awaiting_reply = False
+        self._answers: asyncio.Queue[Transcript] = asyncio.Queue()
+        self._confirming = False
 
     @classmethod
     def from_settings(
@@ -118,6 +151,8 @@ class VoiceWSClient:
         transcripts: asyncio.Queue[Transcript],
         speaker: Speaker,
         state: VoiceStateMachine,
+        confirmations: ConfirmationAPI | None = None,
+        listen: ListenRequest = listening_unavailable,
     ) -> VoiceWSClient:
         return cls(
             url=settings.ws_url,
@@ -127,6 +162,9 @@ class VoiceWSClient:
             conversation_id=settings.conversation_id,
             reconnect_initial_s=settings.ws_reconnect_initial_s,
             reconnect_max_s=settings.ws_reconnect_max_s,
+            confirmations=confirmations,
+            listen=listen,
+            answer_timeout_s=settings.confirmation_answer_timeout_s,
         )
 
     @property
@@ -193,6 +231,10 @@ class VoiceWSClient:
     async def _send_loop(self, connection: WSConnection) -> None:
         while True:
             transcript = await self._transcripts.get()
+            if self._confirming:
+                self._answers.put_nowait(transcript)
+                continue
+
             await self._send(connection, transcript)
 
     async def _receive_loop(self, connection: WSConnection) -> None:
@@ -255,12 +297,7 @@ class VoiceWSClient:
             if isinstance(message, WSReplyMessage):
                 await self._speak_reply(message.payload.role, message.payload.content)
             elif isinstance(message, WSConfirmationRequiredMessage):
-                logger.warning(
-                    "voice.ws_confirmation_required",
-                    epoch=self._epoch,
-                    confirmation_id=str(message.payload.confirmation_id),
-                )
-                await self._speaker.speak(CONFIRMATION_SPEECH)
+                await self._confirm(message.payload)
             else:
                 logger.warning(
                     "voice.ws_error",
@@ -280,6 +317,125 @@ class VoiceWSClient:
 
         logger.info("voice.ws_reply", epoch=self._epoch, role=role, chars=len(content))
         await self._speaker.speak(content)
+
+    async def _confirm(self, payload: ConfirmationRequiredResponse) -> None:
+        logger.info(
+            "voice.confirmation_required",
+            epoch=self._epoch,
+            confirmation_id=str(payload.confirmation_id),
+        )
+        if self._confirmations is None:
+            await self._speaker.speak(CONFIRMATION_SPEECH)
+            return
+
+        self._confirming = True
+        try:
+            pending: ConfirmationRequiredResponse | None = payload
+            for _ in range(CONFIRMATION_CHAIN_LIMIT):
+                if pending is None:
+                    return
+
+                decision = await self._ask(pending.summary)
+                pending = await self._resolve(pending.confirmation_id, decision)
+
+            logger.warning("voice.confirmation_chain_too_long", epoch=self._epoch)
+            await self._speaker.speak(CONFIRMATION_CHAIN_SPEECH)
+        finally:
+            self._confirming = False
+            self._drain_answers()
+
+    async def _ask(self, summary: str) -> Decision:
+        question = CONFIRMATION_QUESTION.format(summary=summary)
+        for _ in range(CONFIRMATION_ATTEMPTS):
+            await self._speaker.speak(question)
+            decision = await self._hear()
+            if decision is not Decision.UNCLEAR:
+                return decision
+
+            question = CONFIRMATION_RETRY
+
+        logger.info("voice.confirmation_unclear_twice", epoch=self._epoch)
+        await self._speaker.speak(CONFIRMATION_GAVE_UP_SPEECH)
+        return Decision.REJECT
+
+    async def _hear(self) -> Decision:
+        self._drain_answers()
+        if not self._listen():
+            logger.warning("voice.confirmation_not_listening", epoch=self._epoch)
+            return Decision.UNCLEAR
+
+        try:
+            answer = await asyncio.wait_for(self._answers.get(), self._answer_timeout_s)
+        except TimeoutError:
+            logger.warning("voice.confirmation_answer_timed_out", epoch=self._epoch)
+            self._state.try_transition(VoiceState.LISTENING, VoiceState.IDLE)
+            return Decision.UNCLEAR
+
+        if answer.epoch != self._epoch:
+            logger.info(
+                "voice.confirmation_answer_dropped_stale_epoch",
+                epoch=answer.epoch,
+                current=self._epoch,
+            )
+            return Decision.UNCLEAR
+
+        decision = classify(answer.text)
+        logger.info(
+            "voice.confirmation_answer",
+            epoch=answer.epoch,
+            decision=decision.value,
+            chars=len(answer.text),
+        )
+        return decision
+
+    async def _resolve(
+        self, confirmation_id: uuid.UUID, decision: Decision
+    ) -> ConfirmationRequiredResponse | None:
+        if self._confirmations is None:
+            return None
+
+        try:
+            resolution = await self._confirmations.resolve(
+                confirmation_id, approved=decision is Decision.CONFIRM
+            )
+        except ConfirmationGoneError as exc:
+            logger.warning(
+                "voice.confirmation_gone",
+                epoch=self._epoch,
+                confirmation_id=str(confirmation_id),
+                detail=exc.message,
+            )
+            await self._speaker.speak(CONFIRMATION_GONE_SPEECH)
+            return None
+        except ConfirmationError as exc:
+            logger.warning(
+                "voice.confirmation_not_delivered",
+                epoch=self._epoch,
+                confirmation_id=str(confirmation_id),
+                detail=exc.message,
+            )
+            await self._speaker.speak(CONFIRMATION_FAILED_SPEECH)
+            return None
+
+        if resolution.pending is not None:
+            return resolution.pending
+
+        if resolution.reply is None:
+            logger.warning("voice.confirmation_reply_empty", epoch=self._epoch)
+            return None
+
+        logger.info("voice.confirmation_reply", epoch=self._epoch, chars=len(resolution.reply))
+        await self._speaker.speak(resolution.reply)
+        return None
+
+    def _drain_answers(self) -> None:
+        while True:
+            try:
+                stale = self._answers.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
+            logger.info("voice.confirmation_answer_discarded", epoch=stale.epoch)
 
     def _next_epoch(self) -> int:
         self._epoch += 1

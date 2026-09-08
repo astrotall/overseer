@@ -957,3 +957,130 @@ def test_listener_forgets_a_half_recorded_utterance_when_the_state_changes() -> 
     feed_now(listener, state, value=SILENCE_RMS)
 
     assert utterances == []
+
+
+def test_a_direct_request_starts_recording_without_a_wake_word() -> None:
+    detector = FakeDetector([0.9])
+    utterances: list[Utterance] = []
+    listener, events, state = make_listener(detector, utterances=utterances)
+    generation = state.generation
+
+    assert listener.request_listening() is True
+    assert state.state is VoiceState.LISTENING
+    assert state.generation == generation + 1
+
+    feed_now(listener, state, value=SPEECH_RMS)
+    for _ in range(4):
+        feed_now(listener, state, value=SILENCE_RMS)
+
+    assert events == []
+    assert detector.chunks == []
+    assert len(utterances) == 1
+    assert utterances[0].outcome is EndpointOutcome.SPEECH
+    assert utterances[0].epoch == unset_epoch()
+    assert state.state is VoiceState.THINKING
+
+
+def test_a_direct_request_reads_the_epoch_once_at_the_moment_it_is_made() -> None:
+    epochs = iter([7, 8, 9])
+    listener, _, _ = make_listener(FakeDetector([]), epoch_provider=lambda: next(epochs))
+
+    assert listener.request_listening() is True
+    assert next(epochs) == 8
+
+
+def test_a_directly_requested_utterance_is_dropped_when_the_connection_reconnected() -> None:
+    epoch = 5
+
+    def current_epoch() -> int:
+        return epoch
+
+    utterances: list[Utterance] = []
+    listener, _, state = make_listener(
+        FakeDetector([]), utterances=utterances, epoch_provider=current_epoch
+    )
+
+    assert listener.request_listening() is True
+
+    feed_now(listener, state, value=SPEECH_RMS)
+    epoch = 6
+    for _ in range(4):
+        feed_now(listener, state, value=SILENCE_RMS)
+
+    assert utterances == []
+    assert state.state is VoiceState.IDLE
+
+
+def test_a_direct_request_is_refused_while_the_connection_is_down() -> None:
+    state = VoiceStateMachine()
+    gate = ConnectionGate(state, opened=True)
+    listener, _, _ = make_listener(FakeDetector([]), state=state, gate=gate)
+
+    gate.close()
+
+    assert listener.request_listening() is False
+    assert state.state is VoiceState.IDLE
+
+
+def test_a_direct_request_is_refused_while_the_agent_is_busy() -> None:
+    state = VoiceStateMachine(VoiceState.SPEAKING)
+    listener, _, _ = make_listener(FakeDetector([]), state=state)
+    generation = state.generation
+
+    assert listener.request_listening() is False
+    assert state.state is VoiceState.SPEAKING
+    assert state.generation == generation
+
+
+def test_a_direct_request_ignores_the_frames_recorded_before_it() -> None:
+    utterances: list[Utterance] = []
+    listener, _, state = make_listener(FakeDetector([]), utterances=utterances)
+    before = queued(state.generation, value=SPEECH_RMS)
+
+    assert listener.request_listening() is True
+
+    listener.feed(before)
+    for _ in range(3):
+        feed_now(listener, state, value=SILENCE_RMS)
+
+    assert len(utterances) == 1
+    assert utterances[0].outcome is EndpointOutcome.NO_SPEECH
+
+
+def test_a_requested_turn_is_abandoned_when_the_connection_drops() -> None:
+    state = VoiceStateMachine()
+    gate = ConnectionGate(state, opened=True)
+    utterances: list[Utterance] = []
+    listener, _, _ = make_listener(FakeDetector([]), state=state, gate=gate, utterances=utterances)
+
+    assert listener.request_listening() is True
+
+    gate.close()
+    feed_now(listener, state, value=SPEECH_RMS)
+
+    assert state.state is VoiceState.IDLE
+    assert utterances == []
+
+
+def test_a_refused_request_leaves_no_epoch_behind_for_the_next_wake_word() -> None:
+    epochs = iter([5, 9, 9, 9, 9, 9])
+    state = VoiceStateMachine(VoiceState.SPEAKING)
+    utterances: list[Utterance] = []
+    listener, events, _ = make_listener(
+        FakeDetector([0.9]),
+        state=state,
+        utterances=utterances,
+        epoch_provider=lambda: next(epochs),
+    )
+
+    assert listener.request_listening() is False
+
+    state.set(VoiceState.IDLE)
+    feed_now(listener, state)
+    assert [event.epoch for event in events] == [9]
+
+    feed_now(listener, state, value=SPEECH_RMS)
+    for _ in range(4):
+        feed_now(listener, state, value=SILENCE_RMS)
+
+    assert [utterance.epoch for utterance in utterances] == [9]

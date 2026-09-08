@@ -5,7 +5,7 @@ from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
 from typing import Final, Self
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +15,7 @@ MODEL_CACHE_DIR: Final[Path] = Path.home() / ".cache" / "overseer" / "tts"
 FALLBACK_MODEL_FILE: Final[str] = "silero_tts.pt"
 URL_DIGEST_CHARS: Final[int] = 12
 TTS_SAMPLE_RATES: Final[frozenset[int]] = frozenset({8_000, 24_000, 48_000})
+HTTP_SCHEMES: Final[dict[str, str]] = {"ws": "http", "wss": "https"}
 
 
 class VoiceSettings(BaseSettings):
@@ -169,7 +170,31 @@ class VoiceSettings(BaseSettings):
         gt=0.0,
         description="Потолок паузы между попытками переподключения",
     )
+    api_url: str | None = Field(
+        default=None,
+        description=(
+            "Адрес REST API для ответа на подтверждения. Пусто — берётся из ws_url: "
+            "та же машина и порт, схема ws → http, wss → https"
+        ),
+    )
+    confirmation_answer_timeout_s: float = Field(
+        default=45.0,
+        gt=0.0,
+        description=(
+            "Сколько ждать голосовой ответ «да» или «нет» на подтверждение: запись "
+            "реплики плюс распознавание. Истекло — ответ считается неясным"
+        ),
+    )
     log_level: str = "INFO"
+
+    @property
+    def api_base_url(self) -> str:
+        if self.api_url:
+            return self.api_url.rstrip("/")
+
+        parts = urlsplit(self.ws_url)
+        scheme = HTTP_SCHEMES.get(parts.scheme, parts.scheme)
+        return urlunsplit((scheme, parts.netloc, "", "", ""))
 
     @property
     def tts_model_file(self) -> Path:
@@ -206,6 +231,7 @@ class VoiceSettings(BaseSettings):
         "tts_model_path",
         "output_device",
         "conversation_id",
+        "api_url",
         mode="before",
     )
     @classmethod
@@ -222,6 +248,17 @@ class VoiceSettings(BaseSettings):
                 "ws_reconnect_max_s не должен быть меньше ws_reconnect_initial_s: потолок "
                 f"паузы {self.ws_reconnect_max_s} с ниже первой паузы "
                 f"{self.ws_reconnect_initial_s} с"
+            )
+
+        return self
+
+    @model_validator(mode="after")
+    def _check_answer_timeout(self) -> Self:
+        if self.confirmation_answer_timeout_s <= self.vad_max_utterance_s:
+            raise ValueError(
+                "confirmation_answer_timeout_s должен превышать vad_max_utterance_s: "
+                f"ожидание ответа {self.confirmation_answer_timeout_s} с обрывает запись "
+                f"реплики длиной до {self.vad_max_utterance_s} с"
             )
 
         return self

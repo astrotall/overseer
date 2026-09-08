@@ -93,6 +93,8 @@ class VoiceListener:
         self._generation = state.generation
         self._opened = self._gate.is_open
         self._recording_epoch: int | None = None
+        self._requested_epoch: int | None = None
+        self._requests = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lifecycle = threading.Lock()
@@ -129,6 +131,22 @@ class VoiceListener:
                 return
 
             self._thread = None
+
+    def request_listening(self) -> bool:
+        if not self._gate.is_open:
+            logger.info("voice.listening_request_refused", reason="gate_closed")
+            return False
+
+        with self._requests:
+            self._requested_epoch = self._epoch_provider()
+            if self._state.try_begin_listening():
+                logger.info("voice.listening_requested", epoch=self._requested_epoch)
+                return True
+
+            self._requested_epoch = None
+
+        logger.info("voice.listening_request_refused", reason=self._state.state.value)
+        return False
 
     def feed(self, frame: QueuedFrame) -> None:
         state, generation = self._state.snapshot()
@@ -188,6 +206,7 @@ class VoiceListener:
             self._reset(self._state.generation)
             return
 
+        self._take_request()
         epoch = self._epoch_provider()
         event = WakeWordEvent(
             epoch=epoch,
@@ -206,6 +225,8 @@ class VoiceListener:
         self._on_wake_word(event)
 
     def _record(self, samples: Int16Frame) -> None:
+        if self._recording_epoch is None:
+            self._recording_epoch = self._take_request()
         if self._recording_epoch is None:
             return
 
@@ -241,6 +262,12 @@ class VoiceListener:
                 truncated=endpoint.truncated,
             )
         )
+
+    def _take_request(self) -> int | None:
+        with self._requests:
+            epoch = self._requested_epoch
+            self._requested_epoch = None
+            return epoch
 
     def _reset(self, generation: int) -> None:
         self._generation = generation

@@ -162,3 +162,28 @@ def test_an_explicit_model_path_wins_over_the_cache(tmp_path: Path) -> None:
     settings = VoiceSettings(tts_model_path=weights)
 
     assert settings.tts_model_file == weights
+
+
+def test_the_api_address_is_derived_from_the_socket_address() -> None:
+    settings = VoiceSettings(ws_url="ws://gate.local:8123/ws/chat")
+
+    assert settings.api_base_url == "http://gate.local:8123"
+
+
+def test_a_secure_socket_gives_a_secure_api_address() -> None:
+    settings = VoiceSettings(ws_url="wss://gate.local/ws/chat")
+
+    assert settings.api_base_url == "https://gate.local"
+
+
+def test_an_explicit_api_address_wins_over_the_socket_one() -> None:
+    settings = VoiceSettings(
+        ws_url="ws://gate.local:8123/ws/chat", api_url="http://other.local:9000/"
+    )
+
+    assert settings.api_base_url == "http://other.local:9000"
+
+
+def test_an_answer_timeout_below_the_longest_utterance_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="confirmation_answer_timeout_s"):
+        VoiceSettings(vad_max_utterance_s=30.0, confirmation_answer_timeout_s=20.0)
