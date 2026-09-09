@@ -18,7 +18,7 @@ from apps.voice.listener import (
     unset_epoch,
 )
 from apps.voice.state import ConnectionGate, VoiceState, VoiceStateMachine
-from apps.voice.vad import Endpointer, EndpointOutcome
+from apps.voice.vad import Endpoint, Endpointer, EndpointOutcome
 
 FRAME_SIZE = 4
 SPEECH_RMS = 4000
@@ -790,8 +790,8 @@ def test_frame_queue_drops_the_oldest_frame_when_it_overflows() -> None:
 def test_state_machine_lets_only_one_trigger_start_listening() -> None:
     state = VoiceStateMachine()
 
-    assert state.try_begin_listening() is True
-    assert state.try_begin_listening() is False
+    assert state.try_begin_listening() is not None
+    assert state.try_begin_listening() is None
     assert state.wake_word_enabled is False
 
 
@@ -799,7 +799,7 @@ def test_state_machine_bumps_the_generation_on_every_real_transition() -> None:
     state = VoiceStateMachine()
     start = state.generation
 
-    assert state.try_begin_listening() is True
+    assert state.try_begin_listening() == start + 1
     assert state.generation == start + 1
 
     state.set(VoiceState.LISTENING)
@@ -816,11 +816,11 @@ def test_state_machine_refuses_a_transition_from_another_state() -> None:
     state = VoiceStateMachine(VoiceState.SPEAKING)
     generation = state.generation
 
-    assert state.try_transition(VoiceState.LISTENING, VoiceState.IDLE) is False
+    assert state.try_transition(VoiceState.LISTENING, VoiceState.IDLE) is None
     assert state.state is VoiceState.SPEAKING
     assert state.generation == generation
 
-    assert state.try_transition(VoiceState.SPEAKING, VoiceState.IDLE) is True
+    assert state.try_transition(VoiceState.SPEAKING, VoiceState.IDLE) is not None
     assert state.snapshot() == (VoiceState.IDLE, generation + 1)
 
 
@@ -1084,3 +1084,91 @@ def test_a_refused_request_leaves_no_epoch_behind_for_the_next_wake_word() -> No
         feed_now(listener, state, value=SILENCE_RMS)
 
     assert [utterance.epoch for utterance in utterances] == [9]
+
+
+class InterruptedEndpointer(Endpointer):
+    def __init__(self, state: VoiceStateMachine, *, taken_by: VoiceState = VoiceState.IDLE) -> None:
+        super().__init__(
+            speech_rms=1000.0,
+            silence_s=0.001,
+            start_timeout_s=0.0005,
+            max_duration_s=1.0,
+        )
+        self._state = state
+        self._taken_by = taken_by
+        self.raced = False
+
+    def feed(self, samples: Int16Frame) -> Endpoint | None:
+        endpoint = super().feed(samples)
+        if endpoint is not None and not self.raced:
+            self.raced = True
+            self._state.try_transition(VoiceState.LISTENING, self._taken_by)
+        return endpoint
+
+
+def finish_utterance(listener: VoiceListener, state: VoiceStateMachine) -> None:
+    feed_now(listener, state, value=SPEECH_RMS)
+    for _ in range(4):
+        feed_now(listener, state, value=SILENCE_RMS)
+
+
+def test_the_utterance_carries_the_generation_of_the_turn_that_recorded_it() -> None:
+    listener, state, utterances = wake_up(FakeDetector([0.9]))
+
+    finish_utterance(listener, state)
+
+    assert len(utterances) == 1
+    assert utterances[0].generation == state.generation
+    assert state.state is VoiceState.THINKING
+
+
+def test_an_utterance_that_ended_after_the_turn_was_taken_away_is_dropped() -> None:
+    state = VoiceStateMachine()
+    endpointer = InterruptedEndpointer(state)
+    utterances: list[Utterance] = []
+    listener, _, _ = make_listener(
+        FakeDetector([0.9]), state=state, endpointer=endpointer, utterances=utterances
+    )
+
+    feed_now(listener, state)
+    assert state.state is VoiceState.LISTENING
+
+    finish_utterance(listener, state)
+
+    assert endpointer.raced is True
+    assert utterances == []
+    assert state.state is VoiceState.IDLE
+
+
+def test_a_requested_utterance_that_ended_after_the_turn_was_taken_away_is_dropped() -> None:
+    state = VoiceStateMachine()
+    endpointer = InterruptedEndpointer(state)
+    utterances: list[Utterance] = []
+    listener, _, _ = make_listener(
+        FakeDetector([]), state=state, endpointer=endpointer, utterances=utterances
+    )
+
+    assert listener.request_listening() is True
+
+    finish_utterance(listener, state)
+
+    assert endpointer.raced is True
+    assert utterances == []
+    assert state.state is VoiceState.IDLE
+
+
+def test_a_turn_taken_away_mid_recording_is_left_to_its_new_owner() -> None:
+    state = VoiceStateMachine()
+    endpointer = InterruptedEndpointer(state, taken_by=VoiceState.SPEAKING)
+    utterances: list[Utterance] = []
+    listener, _, _ = make_listener(
+        FakeDetector([]), state=state, endpointer=endpointer, utterances=utterances
+    )
+
+    assert listener.request_listening() is True
+
+    finish_utterance(listener, state)
+
+    assert endpointer.raced is True
+    assert utterances == []
+    assert state.state is VoiceState.SPEAKING

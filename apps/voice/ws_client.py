@@ -330,13 +330,14 @@ class VoiceWSClient:
 
         self._confirming = True
         try:
-            pending: ConfirmationRequiredResponse | None = payload
+            pending = payload
             for _ in range(CONFIRMATION_CHAIN_LIMIT):
-                if pending is None:
+                decision = await self._ask(pending.summary)
+                resumed = await self._resolve(pending.confirmation_id, decision)
+                if resumed is None:
                     return
 
-                decision = await self._ask(pending.summary)
-                pending = await self._resolve(pending.confirmation_id, decision)
+                pending = resumed
 
             logger.warning("voice.confirmation_chain_too_long", epoch=self._epoch)
             await self._speaker.speak(CONFIRMATION_CHAIN_SPEECH)
@@ -376,6 +377,15 @@ class VoiceWSClient:
                 "voice.confirmation_answer_dropped_stale_epoch",
                 epoch=answer.epoch,
                 current=self._epoch,
+            )
+            return Decision.UNCLEAR
+
+        generation = self._state.generation
+        if answer.generation != generation:
+            logger.info(
+                "voice.confirmation_answer_dropped_stale_generation",
+                generation=answer.generation,
+                current=generation,
             )
             return Decision.UNCLEAR
 

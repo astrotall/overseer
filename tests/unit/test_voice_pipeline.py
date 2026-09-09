@@ -31,6 +31,18 @@ class FakeSTT:
         return result
 
 
+class InterruptedSTT(FakeSTT):
+    def __init__(self, state: VoiceStateMachine, taken_by: VoiceState, *results: Transcription):
+        super().__init__(*results)
+        self._state = state
+        self._taken_by = taken_by
+
+    async def transcribe(self, samples: Int16Frame) -> Transcription:
+        result = await super().transcribe(samples)
+        self._state.set(self._taken_by)
+        return result
+
+
 class FakeCue:
     def __init__(self, *, fails: bool = False) -> None:
         self.played: list[CueKind] = []
@@ -58,6 +70,7 @@ def transcription(
 def utterance(
     *,
     epoch: int = 0,
+    generation: int = 0,
     outcome: EndpointOutcome = EndpointOutcome.SPEECH,
     duration_s: float = 2.0,
 ) -> Utterance:
@@ -68,6 +81,7 @@ def utterance(
     )
     return Utterance(
         epoch=epoch,
+        generation=generation,
         outcome=outcome,
         samples=samples,
         duration_s=duration_s,
@@ -126,6 +140,7 @@ async def test_pipeline_publishes_the_recognised_text() -> None:
     assert transcript.text == "какая погода в Москве"
     assert transcript.language == "ru"
     assert transcript.epoch == 0
+    assert transcript.generation == state.generation
     assert cue.played == []
     assert state.state is VoiceState.THINKING
 
@@ -206,6 +221,31 @@ async def test_pipeline_drops_a_transcript_from_a_connection_that_has_reconnecte
     assert state.state is VoiceState.IDLE
 
 
+async def test_pipeline_drops_a_transcript_whose_turn_ended_while_it_was_recognised() -> None:
+    state = VoiceStateMachine(VoiceState.THINKING)
+    stt = InterruptedSTT(state, VoiceState.IDLE, transcription("удали черновик"))
+    pipeline, transcripts, cue, _ = make_pipeline(stt, state=state)
+    generation = state.generation
+
+    await pipeline.handle(utterance(generation=generation))
+
+    assert transcripts.empty()
+    assert cue.played == []
+    assert state.state is VoiceState.IDLE
+
+
+async def test_a_turn_that_started_while_the_previous_one_was_recognised_is_left_alone() -> None:
+    state = VoiceStateMachine(VoiceState.THINKING)
+    stt = InterruptedSTT(state, VoiceState.LISTENING, transcription("удали черновик"))
+    pipeline, transcripts, _, _ = make_pipeline(stt, state=state)
+    generation = state.generation
+
+    await pipeline.handle(utterance(generation=generation))
+
+    assert transcripts.empty()
+    assert state.state is VoiceState.LISTENING
+
+
 async def test_pipeline_keeps_a_transcript_whose_epoch_still_matches() -> None:
     stt = FakeSTT(transcription("удали черновик"))
     pipeline, transcripts, _, _ = make_pipeline(stt, epoch_provider=lambda: 8)
@@ -230,7 +270,9 @@ async def test_pipeline_drops_a_transcript_when_nobody_drained_the_queue() -> No
 async def test_a_stale_transcript_in_the_queue_gives_way_to_the_one_just_said() -> None:
     stt = FakeSTT(transcription("вторая"))
     pipeline, transcripts, _, state = make_pipeline(stt, epoch_provider=lambda: 2)
-    transcripts.put_nowait(Transcript(epoch=1, text="первая", language="ru", duration_s=2.0))
+    transcripts.put_nowait(
+        Transcript(epoch=1, generation=0, text="первая", language="ru", duration_s=2.0)
+    )
 
     await pipeline.handle(utterance(epoch=2))
 
@@ -242,7 +284,9 @@ async def test_a_stale_transcript_in_the_queue_gives_way_to_the_one_just_said() 
 async def test_a_queued_transcript_of_the_current_epoch_is_not_displaced() -> None:
     stt = FakeSTT(transcription("вторая"))
     pipeline, transcripts, _, state = make_pipeline(stt, epoch_provider=lambda: 2)
-    transcripts.put_nowait(Transcript(epoch=2, text="первая", language="ru", duration_s=2.0))
+    transcripts.put_nowait(
+        Transcript(epoch=2, generation=0, text="первая", language="ru", duration_s=2.0)
+    )
 
     await pipeline.handle(utterance(epoch=2))
 

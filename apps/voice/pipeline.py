@@ -24,6 +24,7 @@ TRANSCRIPT_QUEUE_MAXSIZE: Final[int] = 1
 @dataclass(frozen=True, slots=True)
 class Transcript:
     epoch: int
+    generation: int
     text: str
     language: str | None
     duration_s: float
@@ -60,19 +61,21 @@ class VoicePipeline:
                 published = self._publish(transcript)
         finally:
             if not published:
-                self._state.set(VoiceState.IDLE)
+                self._state.try_transition(
+                    VoiceState.THINKING, VoiceState.IDLE, generation=utterance.generation
+                )
 
     async def _transcribe(self, utterance: Utterance) -> Transcript | None:
         if utterance.outcome is EndpointOutcome.NO_SPEECH:
             logger.info("voice.utterance_silent", epoch=utterance.epoch)
-            await self._notify(CueKind.NOT_UNDERSTOOD)
+            await self._notify(CueKind.NOT_UNDERSTOOD, utterance.generation)
             return None
 
         try:
             transcription = await self._stt.transcribe(utterance.samples)
         except Exception:
             logger.exception("voice.stt_failed", epoch=utterance.epoch)
-            await self._notify(CueKind.NOT_UNDERSTOOD)
+            await self._notify(CueKind.NOT_UNDERSTOOD, utterance.generation)
             return None
 
         if not is_meaningful(transcription):
@@ -88,7 +91,7 @@ class VoicePipeline:
                 no_speech_prob=round(quality.no_speech_prob, 3),
                 avg_logprob=round(quality.avg_logprob, 3),
             )
-            await self._notify(CueKind.NOT_UNDERSTOOD)
+            await self._notify(CueKind.NOT_UNDERSTOOD, utterance.generation)
             return None
 
         try:
@@ -100,11 +103,12 @@ class VoicePipeline:
                 chars=len(transcription.text),
                 errors=[error["type"] for error in exc.errors()],
             )
-            await self._notify(CueKind.NOT_UNDERSTOOD)
+            await self._notify(CueKind.NOT_UNDERSTOOD, utterance.generation)
             return None
 
         return Transcript(
             epoch=utterance.epoch,
+            generation=utterance.generation,
             text=content,
             language=transcription.language,
             duration_s=utterance.duration_s,
@@ -117,6 +121,15 @@ class VoicePipeline:
                 "voice.transcript_dropped_stale_epoch",
                 epoch=transcript.epoch,
                 current=current,
+            )
+            return False
+
+        generation = self._state.generation
+        if transcript.generation != generation:
+            logger.debug(
+                "voice.transcript_dropped_stale_generation",
+                generation=transcript.generation,
+                current=generation,
             )
             return False
 
@@ -168,12 +181,19 @@ class VoicePipeline:
         )
         return True
 
-    async def _notify(self, kind: CueKind) -> None:
-        self._state.set(VoiceState.SPEAKING)
+    async def _notify(self, kind: CueKind, generation: int) -> None:
+        speaking = self._state.try_transition(
+            VoiceState.THINKING, VoiceState.SPEAKING, generation=generation
+        )
         try:
             await self._cue.play(kind)
         except Exception:
             logger.exception("voice.cue_failed", kind=kind.value)
+        finally:
+            if speaking is not None:
+                self._state.try_transition(
+                    VoiceState.SPEAKING, VoiceState.IDLE, generation=speaking
+                )
 
 
 class VoiceSpeaker:

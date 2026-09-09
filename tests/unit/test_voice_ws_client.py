@@ -31,6 +31,9 @@ from apps.voice.state import VoiceState, VoiceStateMachine
 from apps.voice.stt import Segment, Transcription
 from apps.voice.vad import EndpointOutcome
 from apps.voice.ws_client import (
+    CONFIRMATION_ATTEMPTS,
+    CONFIRMATION_CHAIN_LIMIT,
+    CONFIRMATION_CHAIN_SPEECH,
     CONFIRMATION_FAILED_SPEECH,
     CONFIRMATION_GAVE_UP_SPEECH,
     CONFIRMATION_GONE_SPEECH,
@@ -130,8 +133,13 @@ class FakeConnector:
         return session()
 
 
-def transcript(*, epoch: int = FIRST_EPOCH, text: str = "какая погода в москве") -> Transcript:
-    return Transcript(epoch=epoch, text=text, language="ru", duration_s=2.0)
+def transcript(
+    *,
+    epoch: int = FIRST_EPOCH,
+    generation: int = 0,
+    text: str = "какая погода в москве",
+) -> Transcript:
+    return Transcript(epoch=epoch, generation=generation, text=text, language="ru", duration_s=2.0)
 
 
 def reply(content: str | None = "В Москве плюс семь и дождь.") -> str:
@@ -182,9 +190,10 @@ class SilentCue:
         return None
 
 
-def utterance(epoch: int) -> Utterance:
+def utterance(epoch: int, generation: int = 0) -> Utterance:
     return Utterance(
         epoch=epoch,
+        generation=generation,
         outcome=EndpointOutcome.SPEECH,
         samples=np.ones(16_000, dtype=np.int16),
         duration_s=2.0,
@@ -607,7 +616,7 @@ class TestReconnectedTurn:
             await eventually(lambda: client.epoch == SECOND_EPOCH)
 
             state.set(VoiceState.THINKING)
-            await pipeline.handle(utterance(SECOND_EPOCH))
+            await pipeline.handle(utterance(SECOND_EPOCH, state.generation))
             await eventually(lambda: second.sent)
             await asyncio.sleep(0.02)
 
@@ -639,6 +648,7 @@ class FakeMicrophone:
         self,
         transcripts: asyncio.Queue[Transcript],
         speaker: FakeSpeaker,
+        state: VoiceStateMachine,
         *answers: str | None,
     ) -> None:
         self.requests: list[int] = []
@@ -646,6 +656,7 @@ class FakeMicrophone:
         self.deaf = False
         self._transcripts = transcripts
         self._speaker = speaker
+        self._state = state
         self._answers = list(answers)
 
     def __call__(self) -> bool:
@@ -655,11 +666,49 @@ class FakeMicrophone:
 
         answer = self._answers.pop(0) if self._answers else None
         if answer is not None:
-            self._transcripts.put_nowait(transcript(epoch=self.epoch, text=answer))
+            self._transcripts.put_nowait(
+                transcript(epoch=self.epoch, generation=self._state.generation, text=answer)
+            )
         return True
 
 
 CONFIRMATION_ID = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+
+
+class LateAnswerMicrophone:
+    def __init__(
+        self,
+        transcripts: asyncio.Queue[Transcript],
+        state: VoiceStateMachine,
+        answer: str,
+    ) -> None:
+        self.requests = 0
+        self.epoch = FIRST_EPOCH
+        self._transcripts = transcripts
+        self._state = state
+        self._answer = answer
+        self._recorded_at = 0
+
+    def __call__(self) -> bool:
+        self.requests += 1
+        started = self._state.try_begin_listening()
+        if started is None:
+            return False
+
+        if self.requests == 1:
+            self._recorded_at = started
+            return True
+
+        self._transcripts.put_nowait(
+            transcript(epoch=self.epoch, generation=self._recorded_at, text=self._answer)
+        )
+        return True
+
+
+def pending(summary: str = "Отправить письмо?") -> Resolution:
+    return Resolution(
+        pending=ConfirmationRequiredResponse(confirmation_id=uuid.uuid4(), summary=summary)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -690,7 +739,7 @@ def confirmation_rig(
     speaker = FakeSpeaker()
     state = VoiceStateMachine()
     api = confirmations if confirmations is not None else FakeConfirmations()
-    microphone = FakeMicrophone(transcripts, speaker, *answers)
+    microphone = FakeMicrophone(transcripts, speaker, state, *answers)
     client = make_client(
         FakeConnector(connection),
         transcripts=transcripts,
@@ -870,6 +919,67 @@ class TestConfirmation:
             CONFIRMATION_QUESTION.format(summary="Отправить письмо?"),
             "Письмо отправлено.",
         ]
+
+    async def test_a_chain_that_ends_with_an_answer_says_nothing_about_the_limit(self) -> None:
+        api = FakeConfirmations(
+            *[pending(f"Шаг {number}?") for number in range(CONFIRMATION_CHAIN_LIMIT - 1)],
+            Resolution(reply="Готово."),
+        )
+        rig = confirmation_rig(*["да"] * CONFIRMATION_CHAIN_LIMIT, confirmations=api)
+
+        async with running(rig.client):
+            await rig.ask()
+            await eventually(lambda: len(rig.api.calls) == CONFIRMATION_CHAIN_LIMIT)
+            await eventually(lambda: "Готово." in rig.speaker.spoken)
+            await asyncio.sleep(0.02)
+
+        assert CONFIRMATION_CHAIN_SPEECH not in rig.speaker.spoken
+        assert rig.speaker.spoken[-1] == "Готово."
+
+    async def test_a_chain_that_never_ends_is_stopped_out_loud(self) -> None:
+        api = FakeConfirmations(
+            *[pending(f"Шаг {number}?") for number in range(CONFIRMATION_CHAIN_LIMIT)]
+        )
+        rig = confirmation_rig(*["да"] * CONFIRMATION_CHAIN_LIMIT, confirmations=api)
+
+        async with running(rig.client):
+            await rig.ask()
+            await eventually(lambda: CONFIRMATION_CHAIN_SPEECH in rig.speaker.spoken)
+
+        assert rig.api.approvals == [True] * CONFIRMATION_CHAIN_LIMIT
+        assert rig.speaker.spoken[-1] == CONFIRMATION_CHAIN_SPEECH
+
+    async def test_an_answer_recorded_before_the_question_is_not_taken_as_a_decision(self) -> None:
+        connection = FakeConnection(
+            confirmation_required("Удалить файл отчёт.docx", CONFIRMATION_ID),
+            answer=True,
+            gate=asyncio.Event(),
+        )
+        transcripts: asyncio.Queue[Transcript] = asyncio.Queue(maxsize=1)
+        speaker = FakeSpeaker()
+        state = VoiceStateMachine()
+        api = FakeConfirmations()
+        microphone = LateAnswerMicrophone(transcripts, state, "да")
+        client = make_client(
+            FakeConnector(connection),
+            transcripts=transcripts,
+            speaker=speaker,
+            state=state,
+            confirmations=api,
+            listen=microphone,
+            answer_timeout_s=0.02,
+        )
+
+        async with running(client):
+            await eventually(lambda: client.epoch == FIRST_EPOCH)
+            transcripts.put_nowait(
+                transcript(epoch=FIRST_EPOCH, generation=state.generation, text="удали отчёт")
+            )
+            await eventually(lambda: api.calls)
+
+        assert microphone.requests == CONFIRMATION_ATTEMPTS
+        assert api.approvals == [False]
+        assert CONFIRMATION_GAVE_UP_SPEECH in speaker.spoken
 
     async def test_the_turn_is_released_once_the_confirmation_is_over(self) -> None:
         rig = confirmation_rig("да")

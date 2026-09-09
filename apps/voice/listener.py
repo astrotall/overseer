@@ -34,6 +34,7 @@ class WakeWordEvent:
 @dataclass(frozen=True, slots=True)
 class Utterance:
     epoch: int
+    generation: int
     outcome: EndpointOutcome
     samples: Int16Frame
     duration_s: float
@@ -139,7 +140,7 @@ class VoiceListener:
 
         with self._requests:
             self._requested_epoch = self._epoch_provider()
-            if self._state.try_begin_listening():
+            if self._state.try_begin_listening() is not None:
                 logger.info("voice.listening_requested", epoch=self._requested_epoch)
                 return True
 
@@ -160,7 +161,7 @@ class VoiceListener:
         if state is VoiceState.IDLE:
             self._detect(frame.samples, generation)
         elif state is VoiceState.LISTENING:
-            self._record(frame.samples)
+            self._record(frame.samples, generation)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -202,7 +203,7 @@ class VoiceListener:
                 return
 
     def _trigger(self, score: float, generation: int) -> None:
-        if not self._state.try_begin_listening(generation=generation):
+        if self._state.try_begin_listening(generation=generation) is None:
             self._reset(self._state.generation)
             return
 
@@ -224,7 +225,7 @@ class VoiceListener:
         )
         self._on_wake_word(event)
 
-    def _record(self, samples: Int16Frame) -> None:
+    def _record(self, samples: Int16Frame, generation: int) -> None:
         if self._recording_epoch is None:
             self._recording_epoch = self._take_request()
         if self._recording_epoch is None:
@@ -236,19 +237,31 @@ class VoiceListener:
 
         epoch = self._recording_epoch
         self._recording_epoch = None
+        thinking = self._state.try_transition(
+            VoiceState.LISTENING, VoiceState.THINKING, generation=generation
+        )
+        if thinking is None:
+            logger.debug(
+                "voice.utterance_dropped_stale_generation",
+                epoch=epoch,
+                generation=generation,
+                current=self._state.generation,
+            )
+            return
+
         current = self._epoch_provider()
         if epoch != current:
             logger.debug("voice.utterance_dropped_stale_epoch", epoch=epoch, current=current)
             self._state.set(VoiceState.IDLE)
             return
 
-        self._state.set(VoiceState.THINKING)
-        self._emit(epoch, endpoint)
+        self._emit(epoch, thinking, endpoint)
 
-    def _emit(self, epoch: int, endpoint: Endpoint) -> None:
+    def _emit(self, epoch: int, generation: int, endpoint: Endpoint) -> None:
         logger.info(
             "voice.utterance_captured",
             epoch=epoch,
+            generation=generation,
             outcome=endpoint.outcome.value,
             duration_s=round(endpoint.duration_s, 2),
             truncated=endpoint.truncated,
@@ -256,6 +269,7 @@ class VoiceListener:
         self._on_utterance(
             Utterance(
                 epoch=epoch,
+                generation=generation,
                 outcome=endpoint.outcome,
                 samples=endpoint.samples,
                 duration_s=endpoint.duration_s,
