@@ -57,12 +57,19 @@ SECOND_EPOCH = 3
 
 
 class FakeSpeaker:
-    def __init__(self) -> None:
+    def __init__(self, state: VoiceStateMachine | None = None) -> None:
         self.spoken: list[str] = []
+        self._state = state
 
     async def speak(self, text: str) -> bool:
-        self.spoken.append(text)
-        return True
+        if self._state is not None:
+            self._state.set(VoiceState.SPEAKING)
+        try:
+            self.spoken.append(text)
+            return True
+        finally:
+            if self._state is not None:
+                self._state.set(VoiceState.IDLE)
 
 
 class FakeConnection:
@@ -643,6 +650,12 @@ class FakeConfirmations:
         return [approved for _, approved in self.calls]
 
 
+def start_thinking(state: VoiceStateMachine, listening: int) -> int:
+    thinking = state.try_transition(VoiceState.LISTENING, VoiceState.THINKING, generation=listening)
+    assert thinking is not None
+    return thinking
+
+
 class FakeMicrophone:
     def __init__(
         self,
@@ -664,10 +677,18 @@ class FakeMicrophone:
         if self.deaf:
             return False
 
+        listening = self._state.try_begin_listening()
+        if listening is None:
+            return False
+
         answer = self._answers.pop(0) if self._answers else None
         if answer is not None:
             self._transcripts.put_nowait(
-                transcript(epoch=self.epoch, generation=self._state.generation, text=answer)
+                transcript(
+                    epoch=self.epoch,
+                    generation=start_thinking(self._state, listening),
+                    text=answer,
+                )
             )
         return True
 
@@ -695,8 +716,9 @@ class LateAnswerMicrophone:
         if started is None:
             return False
 
+        thinking = start_thinking(self._state, started)
         if self.requests == 1:
-            self._recorded_at = started
+            self._recorded_at = thinking
             return True
 
         self._transcripts.put_nowait(
@@ -736,8 +758,8 @@ def confirmation_rig(
         confirmation_required(summary, CONFIRMATION_ID), answer=True, gate=asyncio.Event()
     )
     transcripts: asyncio.Queue[Transcript] = asyncio.Queue(maxsize=1)
-    speaker = FakeSpeaker()
     state = VoiceStateMachine()
+    speaker = FakeSpeaker(state)
     api = confirmations if confirmations is not None else FakeConfirmations()
     microphone = FakeMicrophone(transcripts, speaker, state, *answers)
     client = make_client(
@@ -956,8 +978,8 @@ class TestConfirmation:
             gate=asyncio.Event(),
         )
         transcripts: asyncio.Queue[Transcript] = asyncio.Queue(maxsize=1)
-        speaker = FakeSpeaker()
         state = VoiceStateMachine()
+        speaker = FakeSpeaker(state)
         api = FakeConfirmations()
         microphone = LateAnswerMicrophone(transcripts, state, "да")
         client = make_client(

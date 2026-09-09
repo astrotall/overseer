@@ -1172,3 +1172,43 @@ def test_a_turn_taken_away_mid_recording_is_left_to_its_new_owner() -> None:
     assert endpointer.raced is True
     assert utterances == []
     assert state.state is VoiceState.SPEAKING
+
+
+class TurnStealingEpochProvider:
+    def __init__(
+        self,
+        state: VoiceStateMachine,
+        *,
+        epoch: int,
+        stale: int,
+        taken_by: VoiceState = VoiceState.SPEAKING,
+    ) -> None:
+        self._state = state
+        self._epoch = epoch
+        self._stale = stale
+        self._taken_by = taken_by
+        self.raced = False
+
+    def __call__(self) -> int:
+        if not self.raced and self._state.state is VoiceState.THINKING:
+            self.raced = True
+            self._state.try_transition(VoiceState.THINKING, self._taken_by)
+            return self._stale
+        return self._epoch
+
+
+def test_a_stale_utterance_does_not_reset_a_turn_that_already_changed_hands() -> None:
+    state = VoiceStateMachine()
+    epochs = TurnStealingEpochProvider(state, epoch=5, stale=6)
+    utterances: list[Utterance] = []
+    listener, _, _ = make_listener(
+        FakeDetector([]), state=state, utterances=utterances, epoch_provider=epochs
+    )
+
+    assert listener.request_listening() is True
+
+    finish_utterance(listener, state)
+
+    assert epochs.raced is True
+    assert utterances == []
+    assert state.state is VoiceState.SPEAKING

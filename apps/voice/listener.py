@@ -252,7 +252,7 @@ class VoiceListener:
         current = self._epoch_provider()
         if epoch != current:
             logger.debug("voice.utterance_dropped_stale_epoch", epoch=epoch, current=current)
-            self._state.set(VoiceState.IDLE)
+            self._state.try_transition(VoiceState.THINKING, VoiceState.IDLE, generation=thinking)
             return
 
         self._emit(epoch, thinking, endpoint)

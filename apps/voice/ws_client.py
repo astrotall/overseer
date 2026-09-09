@@ -452,5 +452,4 @@ class VoiceWSClient:
         return self._epoch
 
     def _release_turn(self) -> None:
-        if self._state.state is VoiceState.THINKING:
-            self._state.set(VoiceState.IDLE)
+        self._state.try_transition(VoiceState.THINKING, VoiceState.IDLE)
