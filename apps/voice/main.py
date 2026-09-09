@@ -8,6 +8,7 @@ from typing import Final
 from apps.voice.audio import FrameQueue
 from apps.voice.capture import AudioCapture, resolve_device
 from apps.voice.config import VoiceSettings, get_voice_settings
+from apps.voice.confirmations import HTTPConfirmationAPI
 from apps.voice.cues import BeepCue
 from apps.voice.listener import AsyncioSink, Utterance, VoiceListener, WakeWordEvent
 from apps.voice.pipeline import (
@@ -52,8 +53,14 @@ async def run(settings: VoiceSettings) -> None:
     transcripts: asyncio.Queue[Transcript] = asyncio.Queue(maxsize=TRANSCRIPT_QUEUE_MAXSIZE)
 
     speaker, player = build_speaker(settings, state)
+    confirmations = HTTPConfirmationAPI.from_settings(settings)
     client = VoiceWSClient.from_settings(
-        settings, transcripts=transcripts, speaker=speaker, state=state
+        settings,
+        transcripts=transcripts,
+        speaker=speaker,
+        state=state,
+        confirmations=confirmations,
+        listen=lambda: listener.request_listening(),
     )
     listener = VoiceListener(
         frames=frames,
@@ -89,6 +96,7 @@ async def run(settings: VoiceSettings) -> None:
             phrase=settings.wake_word_phrase,
             threshold=settings.wake_word_threshold,
             ws_url=client.url,
+            api_url=settings.api_base_url,
         )
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(announce_wake_words(events, frames))
@@ -98,6 +106,7 @@ async def run(settings: VoiceSettings) -> None:
         capture.stop()
         listener.stop()
         player.stop()
+        await confirmations.aclose()
 
 
 def build_speaker(

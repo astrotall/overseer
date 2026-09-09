@@ -45,18 +45,18 @@ class VoiceStateMachine:
 
     def try_transition(
         self, expected: VoiceState, target: VoiceState, *, generation: int | None = None
-    ) -> bool:
+    ) -> int | None:
         with self._lock:
             if self._state is not expected or target is expected:
-                return False
+                return None
             if generation is not None and generation != self._generation:
-                return False
+                return None
 
             self._state = target
             self._generation += 1
-            return True
+            return self._generation
 
-    def try_begin_listening(self, *, generation: int | None = None) -> bool:
+    def try_begin_listening(self, *, generation: int | None = None) -> int | None:
         return self.try_transition(VoiceState.IDLE, VoiceState.LISTENING, generation=generation)
 
     def invalidate_input(self) -> bool:

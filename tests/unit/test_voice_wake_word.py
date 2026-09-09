@@ -18,7 +18,7 @@ from apps.voice.listener import (
     unset_epoch,
 )
 from apps.voice.state import ConnectionGate, VoiceState, VoiceStateMachine
-from apps.voice.vad import Endpointer, EndpointOutcome
+from apps.voice.vad import Endpoint, Endpointer, EndpointOutcome
 
 FRAME_SIZE = 4
 SPEECH_RMS = 4000
@@ -790,8 +790,8 @@ def test_frame_queue_drops_the_oldest_frame_when_it_overflows() -> None:
 def test_state_machine_lets_only_one_trigger_start_listening() -> None:
     state = VoiceStateMachine()
 
-    assert state.try_begin_listening() is True
-    assert state.try_begin_listening() is False
+    assert state.try_begin_listening() is not None
+    assert state.try_begin_listening() is None
     assert state.wake_word_enabled is False
 
 
@@ -799,7 +799,7 @@ def test_state_machine_bumps_the_generation_on_every_real_transition() -> None:
     state = VoiceStateMachine()
     start = state.generation
 
-    assert state.try_begin_listening() is True
+    assert state.try_begin_listening() == start + 1
     assert state.generation == start + 1
 
     state.set(VoiceState.LISTENING)
@@ -816,11 +816,11 @@ def test_state_machine_refuses_a_transition_from_another_state() -> None:
     state = VoiceStateMachine(VoiceState.SPEAKING)
     generation = state.generation
 
-    assert state.try_transition(VoiceState.LISTENING, VoiceState.IDLE) is False
+    assert state.try_transition(VoiceState.LISTENING, VoiceState.IDLE) is None
     assert state.state is VoiceState.SPEAKING
     assert state.generation == generation
 
-    assert state.try_transition(VoiceState.SPEAKING, VoiceState.IDLE) is True
+    assert state.try_transition(VoiceState.SPEAKING, VoiceState.IDLE) is not None
     assert state.snapshot() == (VoiceState.IDLE, generation + 1)
 
 
@@ -957,3 +957,258 @@ def test_listener_forgets_a_half_recorded_utterance_when_the_state_changes() -> 
     feed_now(listener, state, value=SILENCE_RMS)
 
     assert utterances == []
+
+
+def test_a_direct_request_starts_recording_without_a_wake_word() -> None:
+    detector = FakeDetector([0.9])
+    utterances: list[Utterance] = []
+    listener, events, state = make_listener(detector, utterances=utterances)
+    generation = state.generation
+
+    assert listener.request_listening() is True
+    assert state.state is VoiceState.LISTENING
+    assert state.generation == generation + 1
+
+    feed_now(listener, state, value=SPEECH_RMS)
+    for _ in range(4):
+        feed_now(listener, state, value=SILENCE_RMS)
+
+    assert events == []
+    assert detector.chunks == []
+    assert len(utterances) == 1
+    assert utterances[0].outcome is EndpointOutcome.SPEECH
+    assert utterances[0].epoch == unset_epoch()
+    assert state.state is VoiceState.THINKING
+
+
+def test_a_direct_request_reads_the_epoch_once_at_the_moment_it_is_made() -> None:
+    epochs = iter([7, 8, 9])
+    listener, _, _ = make_listener(FakeDetector([]), epoch_provider=lambda: next(epochs))
+
+    assert listener.request_listening() is True
+    assert next(epochs) == 8
+
+
+def test_a_directly_requested_utterance_is_dropped_when_the_connection_reconnected() -> None:
+    epoch = 5
+
+    def current_epoch() -> int:
+        return epoch
+
+    utterances: list[Utterance] = []
+    listener, _, state = make_listener(
+        FakeDetector([]), utterances=utterances, epoch_provider=current_epoch
+    )
+
+    assert listener.request_listening() is True
+
+    feed_now(listener, state, value=SPEECH_RMS)
+    epoch = 6
+    for _ in range(4):
+        feed_now(listener, state, value=SILENCE_RMS)
+
+    assert utterances == []
+    assert state.state is VoiceState.IDLE
+
+
+def test_a_direct_request_is_refused_while_the_connection_is_down() -> None:
+    state = VoiceStateMachine()
+    gate = ConnectionGate(state, opened=True)
+    listener, _, _ = make_listener(FakeDetector([]), state=state, gate=gate)
+
+    gate.close()
+
+    assert listener.request_listening() is False
+    assert state.state is VoiceState.IDLE
+
+
+def test_a_direct_request_is_refused_while_the_agent_is_busy() -> None:
+    state = VoiceStateMachine(VoiceState.SPEAKING)
+    listener, _, _ = make_listener(FakeDetector([]), state=state)
+    generation = state.generation
+
+    assert listener.request_listening() is False
+    assert state.state is VoiceState.SPEAKING
+    assert state.generation == generation
+
+
+def test_a_direct_request_ignores_the_frames_recorded_before_it() -> None:
+    utterances: list[Utterance] = []
+    listener, _, state = make_listener(FakeDetector([]), utterances=utterances)
+    before = queued(state.generation, value=SPEECH_RMS)
+
+    assert listener.request_listening() is True
+
+    listener.feed(before)
+    for _ in range(3):
+        feed_now(listener, state, value=SILENCE_RMS)
+
+    assert len(utterances) == 1
+    assert utterances[0].outcome is EndpointOutcome.NO_SPEECH
+
+
+def test_a_requested_turn_is_abandoned_when_the_connection_drops() -> None:
+    state = VoiceStateMachine()
+    gate = ConnectionGate(state, opened=True)
+    utterances: list[Utterance] = []
+    listener, _, _ = make_listener(FakeDetector([]), state=state, gate=gate, utterances=utterances)
+
+    assert listener.request_listening() is True
+
+    gate.close()
+    feed_now(listener, state, value=SPEECH_RMS)
+
+    assert state.state is VoiceState.IDLE
+    assert utterances == []
+
+
+def test_a_refused_request_leaves_no_epoch_behind_for_the_next_wake_word() -> None:
+    epochs = iter([5, 9, 9, 9, 9, 9])
+    state = VoiceStateMachine(VoiceState.SPEAKING)
+    utterances: list[Utterance] = []
+    listener, events, _ = make_listener(
+        FakeDetector([0.9]),
+        state=state,
+        utterances=utterances,
+        epoch_provider=lambda: next(epochs),
+    )
+
+    assert listener.request_listening() is False
+
+    state.set(VoiceState.IDLE)
+    feed_now(listener, state)
+    assert [event.epoch for event in events] == [9]
+
+    feed_now(listener, state, value=SPEECH_RMS)
+    for _ in range(4):
+        feed_now(listener, state, value=SILENCE_RMS)
+
+    assert [utterance.epoch for utterance in utterances] == [9]
+
+
+class InterruptedEndpointer(Endpointer):
+    def __init__(self, state: VoiceStateMachine, *, taken_by: VoiceState = VoiceState.IDLE) -> None:
+        super().__init__(
+            speech_rms=1000.0,
+            silence_s=0.001,
+            start_timeout_s=0.0005,
+            max_duration_s=1.0,
+        )
+        self._state = state
+        self._taken_by = taken_by
+        self.raced = False
+
+    def feed(self, samples: Int16Frame) -> Endpoint | None:
+        endpoint = super().feed(samples)
+        if endpoint is not None and not self.raced:
+            self.raced = True
+            self._state.try_transition(VoiceState.LISTENING, self._taken_by)
+        return endpoint
+
+
+def finish_utterance(listener: VoiceListener, state: VoiceStateMachine) -> None:
+    feed_now(listener, state, value=SPEECH_RMS)
+    for _ in range(4):
+        feed_now(listener, state, value=SILENCE_RMS)
+
+
+def test_the_utterance_carries_the_generation_of_the_turn_that_recorded_it() -> None:
+    listener, state, utterances = wake_up(FakeDetector([0.9]))
+
+    finish_utterance(listener, state)
+
+    assert len(utterances) == 1
+    assert utterances[0].generation == state.generation
+    assert state.state is VoiceState.THINKING
+
+
+def test_an_utterance_that_ended_after_the_turn_was_taken_away_is_dropped() -> None:
+    state = VoiceStateMachine()
+    endpointer = InterruptedEndpointer(state)
+    utterances: list[Utterance] = []
+    listener, _, _ = make_listener(
+        FakeDetector([0.9]), state=state, endpointer=endpointer, utterances=utterances
+    )
+
+    feed_now(listener, state)
+    assert state.state is VoiceState.LISTENING
+
+    finish_utterance(listener, state)
+
+    assert endpointer.raced is True
+    assert utterances == []
+    assert state.state is VoiceState.IDLE
+
+
+def test_a_requested_utterance_that_ended_after_the_turn_was_taken_away_is_dropped() -> None:
+    state = VoiceStateMachine()
+    endpointer = InterruptedEndpointer(state)
+    utterances: list[Utterance] = []
+    listener, _, _ = make_listener(
+        FakeDetector([]), state=state, endpointer=endpointer, utterances=utterances
+    )
+
+    assert listener.request_listening() is True
+
+    finish_utterance(listener, state)
+
+    assert endpointer.raced is True
+    assert utterances == []
+    assert state.state is VoiceState.IDLE
+
+
+def test_a_turn_taken_away_mid_recording_is_left_to_its_new_owner() -> None:
+    state = VoiceStateMachine()
+    endpointer = InterruptedEndpointer(state, taken_by=VoiceState.SPEAKING)
+    utterances: list[Utterance] = []
+    listener, _, _ = make_listener(
+        FakeDetector([]), state=state, endpointer=endpointer, utterances=utterances
+    )
+
+    assert listener.request_listening() is True
+
+    finish_utterance(listener, state)
+
+    assert endpointer.raced is True
+    assert utterances == []
+    assert state.state is VoiceState.SPEAKING
+
+
+class TurnStealingEpochProvider:
+    def __init__(
+        self,
+        state: VoiceStateMachine,
+        *,
+        epoch: int,
+        stale: int,
+        taken_by: VoiceState = VoiceState.SPEAKING,
+    ) -> None:
+        self._state = state
+        self._epoch = epoch
+        self._stale = stale
+        self._taken_by = taken_by
+        self.raced = False
+
+    def __call__(self) -> int:
+        if not self.raced and self._state.state is VoiceState.THINKING:
+            self.raced = True
+            self._state.try_transition(VoiceState.THINKING, self._taken_by)
+            return self._stale
+        return self._epoch
+
+
+def test_a_stale_utterance_does_not_reset_a_turn_that_already_changed_hands() -> None:
+    state = VoiceStateMachine()
+    epochs = TurnStealingEpochProvider(state, epoch=5, stale=6)
+    utterances: list[Utterance] = []
+    listener, _, _ = make_listener(
+        FakeDetector([]), state=state, utterances=utterances, epoch_provider=epochs
+    )
+
+    assert listener.request_listening() is True
+
+    finish_utterance(listener, state)
+
+    assert epochs.raced is True
+    assert utterances == []
+    assert state.state is VoiceState.SPEAKING
