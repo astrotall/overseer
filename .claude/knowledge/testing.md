@@ -76,7 +76,22 @@
   нужны, нужен движок из группы `browser`. Часы подменены — простой в тесте проматывается,
   а не выжидается. Без установленного Chromium тест пропускается, но под `CI` поднимает
   исходную ошибку: там движок ставится шагом пайплайна, и молча зелёный прогон означал бы,
-  что жизненный цикл никто не проверил;
+  что жизненный цикл никто не проверил. В CI эти тесты идут с `BROWSER_NO_SANDBOX=true`
+  (Ubuntu 24.04 запрещает непривилегированные user namespace'ы), а песочница проверяется
+  отдельно — прогоном этого же файла внутри собранного образа `apps/api`:
+
+  ```bash
+  docker compose -f docker/docker-compose.yml build api
+  # в образе нет dev-группы, поэтому pytest доставляется одноразовым слоем поверх него
+  printf 'FROM overseer-api\nUSER root\nRUN uv sync --frozen --group browser\nUSER overseer\n' \
+      | docker build -t overseer-api-test -f - .
+  docker run --rm --security-opt seccomp=./docker/chromium-seccomp.json \
+      -v "$PWD/tests:/app/tests:ro" -v "$PWD/pyproject.toml:/app/pyproject.toml:ro" \
+      overseer-api-test pytest -m browser
+  ```
+
+  Разбор, что именно этим проверяется и почему без seccomp-профиля Chromium не стартует, —
+  в [architecture.md](architecture.md), раздел «Песочница Chromium»;
 - `tests/unit/` — юнит-тесты бизнес-логики: конфиг, LLM-клиенты и фабрика, контракт
   `libs/llm/base.py`, протокол инструмента `libs/tools/base.py` (`test_tool_protocol.py`:
   прямой вызов `EchoTool`, построение `ToolSpec`, ошибки аргументов и исключение внутри
@@ -122,7 +137,11 @@
   подъём на следующем вызове, вытеснение самой давней незанятой сессии на потолке и
   неприкосновенность занятой, живучесть сборщика после сбоя. Ни одного запущенного браузера
   здесь нет: движок за портом `BrowserBackend`, поэтому эти тесты идут в CI и без группы
-  `browser`;
+  `browser`. Там же — восстановление после падения браузера **между двумя арендами одного
+  разговора**: фейковый бэкенд «роняет» браузер (`crash()` гасит `connected`, оставляя
+  `running`), и следующая аренда обязана выдать новый контекст, а не сохранённый мёртвый.
+  Тест краснеет ровно на снятой проверке `connected` в `_lease()` — до OVE-36 повторная
+  аренда смотрела только на наличие записи в таблице сессий;
 - секции `[tool.pytest.ini_options]` и `[tool.coverage.*]` в `pyproject.toml`;
 - `.pre-commit-config.yaml` — хуки на трёх стадиях (`pre-commit`, `commit-msg`, `pre-push`);
 - `.github/workflows/ci.yml` — CI на GitHub Actions.

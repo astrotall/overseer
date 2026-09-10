@@ -27,20 +27,31 @@ class FakeBackend:
         self.starts = 0
         self.stops = 0
         self._running = False
+        self._connected = False
 
     @property
     def running(self) -> bool:
         return self._running
 
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    def crash(self) -> None:
+        """Браузер упал снаружи: ссылка на него у бэкенда есть, соединения нет."""
+        self._connected = False
+
     async def new_context(self) -> FakeContext:
-        if not self._running:
+        if not self._running or not self._connected:
             self._running = True
+            self._connected = True
             self.starts += 1
         context = FakeContext(len(self.contexts))
         self.contexts.append(context)
         return context
 
     async def aclose(self) -> None:
+        self._connected = False
         if self._running:
             self._running = False
             self.stops += 1
@@ -194,6 +205,72 @@ class TestLifecycle:
 
         assert await manager.close_session(conversation_id) is True
         assert manager.active_sessions == 0
+
+
+class TestCrashRecovery:
+    async def test_a_conversation_recovers_when_the_browser_died_between_calls(
+        self, manager: BrowserSessionManager[FakeContext], backend: FakeBackend
+    ) -> None:
+        conversation_id = uuid.uuid4()
+
+        async with manager.acquire(conversation_id) as dead:
+            pass
+
+        backend.crash()
+
+        async with manager.acquire(conversation_id) as fresh:
+            pass
+
+        assert fresh is not dead
+        assert backend.starts == 2
+        assert len(backend.contexts) == 2
+        assert manager.active_sessions == 1
+
+    async def test_the_context_of_a_dead_browser_is_not_handed_out_again(
+        self, manager: BrowserSessionManager[FakeContext], backend: FakeBackend
+    ) -> None:
+        conversation_id = uuid.uuid4()
+
+        async with manager.acquire(conversation_id) as dead:
+            pass
+
+        backend.crash()
+
+        async with manager.acquire(conversation_id):
+            pass
+
+        assert dead.closed
+
+    async def test_a_dead_context_that_refuses_to_close_still_gets_replaced(
+        self, manager: BrowserSessionManager[FakeContext], backend: FakeBackend
+    ) -> None:
+        conversation_id = uuid.uuid4()
+
+        async with manager.acquire(conversation_id) as dead:
+            pass
+
+        async def explode() -> None:
+            raise RuntimeError("контекст умер вместе с браузером")
+
+        dead.close = explode  # type: ignore[method-assign]  # эмуляция сбоя браузера
+        backend.crash()
+
+        async with manager.acquire(conversation_id) as fresh:
+            assert fresh is not dead
+
+        assert manager.active_sessions == 1
+
+    async def test_a_live_browser_is_never_restarted_on_reuse(
+        self, manager: BrowserSessionManager[FakeContext], backend: FakeBackend
+    ) -> None:
+        conversation_id = uuid.uuid4()
+
+        for _ in range(3):
+            async with manager.acquire(conversation_id):
+                pass
+
+        assert backend.starts == 1
+        assert len(backend.contexts) == 1
 
 
 class TestIdleSweep:

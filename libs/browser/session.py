@@ -28,6 +28,9 @@ class BrowserBackend(Protocol[ContextT_co]):
     @property
     def running(self) -> bool: ...
 
+    @property
+    def connected(self) -> bool: ...
+
     async def new_context(self) -> ContextT_co: ...
 
     async def aclose(self) -> None: ...
@@ -150,6 +153,10 @@ class BrowserSessionManager(Generic[ContextT]):
                 )
 
             session = self._sessions.get(conversation_id)
+            if session is not None and not self._backend.connected:
+                del self._sessions[conversation_id]
+                await self._discard_dead_context(session)
+                session = None
             if session is None:
                 await self._make_room()
                 context = await self._backend.new_context()
@@ -190,6 +197,21 @@ class BrowserSessionManager(Generic[ContextT]):
         victim = min(idle, key=lambda session: session.last_used_at)
         del self._sessions[victim.conversation_id]
         await self._close_context(victim, reason="evicted")
+
+    async def _discard_dead_context(self, session: BrowserSession[ContextT]) -> None:
+        logger.warning(
+            "browser.session_context_discarded",
+            conversation_id=str(session.conversation_id),
+            leases=session.leases,
+        )
+        try:
+            await session.context.close()
+        except Exception as exc:
+            logger.warning(
+                "browser.dead_context_close_failed",
+                conversation_id=str(session.conversation_id),
+                error=type(exc).__name__,
+            )
 
     async def _close_context(self, session: BrowserSession[ContextT], *, reason: str) -> None:
         try:

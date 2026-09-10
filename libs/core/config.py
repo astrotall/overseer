@@ -72,8 +72,9 @@ class Settings(BaseSettings):
     browser_no_sandbox: bool = Field(
         default=False,
         description=(
-            "Отключить песочницу Chromium. Нужно только там, где процесс идёт от root "
-            "(образ apps/api), — вне контейнера песочницу не трогаем."
+            "Отключить песочницу Chromium. Аварийный выход для окружения, которое не даёт "
+            "поднять пользовательские namespace'ы: без песочницы отрендеренная страница "
+            "исполняется в том же процессном пространстве, что и сам агент."
         ),
     )
     browser_idle_ttl_seconds: int = Field(

@@ -43,6 +43,12 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://overseer:overseer@localhost:5432/overseer
       DATABASE_URL_TEST: postgresql+asyncpg://overseer:overseer@localhost:5432/overseer_test
       REDIS_URL: redis://localhost:6379/0
+      # Ubuntu 24.04 (ubuntu-latest) ограничивает непривилегированные user
+      # namespace'ы через AppArmor, а без них песочница Chromium не поднимается.
+      # Браузерные тесты здесь открывают только локальный set_content, никакого
+      # недоверенного контента; сама песочница проверяется в образе apps/api,
+      # где она и нужна, — см. .claude/knowledge/architecture.md.
+      BROWSER_NO_SANDBOX: "true"
 
     steps:
       - uses: actions/checkout@v4

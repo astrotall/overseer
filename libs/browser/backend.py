@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 CONTAINER_LAUNCH_ARGS: Final[tuple[str, ...]] = ("--disable-dev-shm-usage",)
-NO_SANDBOX_ARGS: Final[tuple[str, ...]] = ("--no-sandbox", "--disable-setuid-sandbox")
 
 PLAYWRIGHT_MISSING = (
     "Playwright не установлен: браузерные инструменты недоступны. "
@@ -33,13 +32,19 @@ class PlaywrightBrowserBackend:
         launch_args: Sequence[str] = CONTAINER_LAUNCH_ARGS,
     ) -> None:
         self._headless = headless
-        self._launch_args = [*launch_args, *(NO_SANDBOX_ARGS if no_sandbox else ())]
+        self._sandbox = not no_sandbox
+        self._launch_args = list(launch_args)
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
 
     @property
     def running(self) -> bool:
         return self._browser is not None
+
+    @property
+    def connected(self) -> bool:
+        browser = self._browser
+        return browser is not None and browser.is_connected()
 
     async def new_context(self) -> BrowserContext:
         browser = await self._ensure_browser()
@@ -62,9 +67,9 @@ class PlaywrightBrowserBackend:
 
     async def _ensure_browser(self) -> Browser:
         browser = self._browser
-        if browser is not None and browser.is_connected():
-            return browser
         if browser is not None:
+            if self.connected:
+                return browser
             logger.warning("browser.reconnecting_after_crash")
             await self.aclose()
 
@@ -72,11 +77,14 @@ class PlaywrightBrowserBackend:
             self._playwright = await self._start_playwright()
 
         self._browser = await self._playwright.chromium.launch(
-            headless=self._headless, args=self._launch_args
+            headless=self._headless,
+            args=self._launch_args,
+            chromium_sandbox=self._sandbox,
         )
         logger.info(
             "browser.launched",
             headless=self._headless,
+            sandbox=self._sandbox,
             version=self._browser.version,
         )
         return self._browser
