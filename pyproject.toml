@@ -24,6 +24,9 @@ dependencies = [
 ]
 
 [dependency-groups]
+browser = [
+    "playwright>=1.47",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -55,6 +58,7 @@ asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 markers = [
     "integration: требует живых PostgreSQL/Redis",
+    "browser: требует установленного Playwright с Chromium (группа browser)",
     "windows: требует Windows и live-сессии пользователя (apps/executor)",
 ]
 [tool.coverage.run]

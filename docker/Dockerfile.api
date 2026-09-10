@@ -7,22 +7,30 @@ ENV PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/app/.venv \
-    PATH="/app/.venv/bin:$PATH"
+    PATH="/app/.venv/bin:$PATH" \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
+RUN useradd --create-home --uid 10001 overseer
+
 WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project --group browser
+
+RUN playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
 
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY libs ./libs
 COPY apps ./apps
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --group browser
+
+USER overseer
 
 EXPOSE 8000
 

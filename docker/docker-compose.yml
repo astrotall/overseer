@@ -42,6 +42,12 @@ services:
       dockerfile: docker/Dockerfile.api
     container_name: overseer-api
     restart: unless-stopped
+    # Песочница Chromium поднимает пользовательские namespace'ы, а дефолтный
+    # seccomp-профиль Docker их запрещает. Профиль ниже — тот же дефолт плюс
+    # clone/setns/unshare; без него Chromium откажется стартовать (и это лучше,
+    # чем стартовать без песочницы). Подробности — architecture.md.
+    security_opt:
+      - seccomp=./chromium-seccomp.json
     env_file:
       - path: ../.env
         required: false

@@ -68,6 +68,30 @@
   подменяет `get_active_llm_client`, даже тот, что проверяет 404 и до LLM не доходит:
   зависимости маршрута FastAPI резолвит **до** тела хендлера, поэтому без подмены тест падает
   в CI на `ConfigurationError` (ключа провайдера там нет), а не на проверяемом коде;
+- `tests/integration/test_browser_playwright.py` — жизненный цикл браузера (OVE-36) на
+  **живом Chromium**: контекст умеет отрисовать страницу, куки одного разговора переживают
+  вызовы и не видны другому разговору, истёкший по простою контекст действительно закрыт (и
+  новый приезжает чистым), а `aclose()` не оставляет за собой ни браузера, ни открытых
+  страниц. Помечен `@pytest.mark.browser`, а не `integration`: PostgreSQL и Redis ему не
+  нужны, нужен движок из группы `browser`. Часы подменены — простой в тесте проматывается,
+  а не выжидается. Без установленного Chromium тест пропускается, но под `CI` поднимает
+  исходную ошибку: там движок ставится шагом пайплайна, и молча зелёный прогон означал бы,
+  что жизненный цикл никто не проверил. В CI эти тесты идут с `BROWSER_NO_SANDBOX=true`
+  (Ubuntu 24.04 запрещает непривилегированные user namespace'ы), а песочница проверяется
+  отдельно — прогоном этого же файла внутри собранного образа `apps/api`:
+
+  ```bash
+  docker compose -f docker/docker-compose.yml build api
+  # в образе нет dev-группы, поэтому pytest доставляется одноразовым слоем поверх него
+  printf 'FROM overseer-api\nUSER root\nRUN uv sync --frozen --group browser\nUSER overseer\n' \
+      | docker build -t overseer-api-test -f - .
+  docker run --rm --security-opt seccomp=./docker/chromium-seccomp.json \
+      -v "$PWD/tests:/app/tests:ro" -v "$PWD/pyproject.toml:/app/pyproject.toml:ro" \
+      overseer-api-test pytest -m browser
+  ```
+
+  Разбор, что именно этим проверяется и почему без seccomp-профиля Chromium не стартует, —
+  в [architecture.md](architecture.md), раздел «Песочница Chromium»;
 - `tests/unit/` — юнит-тесты бизнес-логики: конфиг, LLM-клиенты и фабрика, контракт
   `libs/llm/base.py`, протокол инструмента `libs/tools/base.py` (`test_tool_protocol.py`:
   прямой вызов `EchoTool`, построение `ToolSpec`, ошибки аргументов и исключение внутри
@@ -105,7 +129,19 @@
   `generation`, а не на чём-то ещё. Там же, рядом с ними, зафиксировано и то, что дроп чужого
   хода **не возвращает состояние в `idle`**: ход остаётся у нового владельца. А по
   `apps/api` — подрезка среза истории до границы хода (`test_chat_history_slice.py`:
-  чистая функция `cut_to_turn_boundary`, без базы);
+  чистая функция `cut_to_turn_boundary`, без базы). Там же — `test_browser_sessions.py`:
+  вся логика `BrowserSessionManager` (OVE-36) на фейковом бэкенде и управляемых часах —
+  переиспользование контекста разговором и изоляция разговоров, ленивый запуск браузера при
+  первом вызове, закрытие по простою и то, что **занятый вызовом контекст не закрывается
+  из-под него**, остановка браузера на последнем истёкшем контексте и его самостоятельный
+  подъём на следующем вызове, вытеснение самой давней незанятой сессии на потолке и
+  неприкосновенность занятой, живучесть сборщика после сбоя. Ни одного запущенного браузера
+  здесь нет: движок за портом `BrowserBackend`, поэтому эти тесты идут в CI и без группы
+  `browser`. Там же — восстановление после падения браузера **между двумя арендами одного
+  разговора**: фейковый бэкенд «роняет» браузер (`crash()` гасит `connected`, оставляя
+  `running`), и следующая аренда обязана выдать новый контекст, а не сохранённый мёртвый.
+  Тест краснеет ровно на снятой проверке `connected` в `_lease()` — до OVE-36 повторная
+  аренда смотрела только на наличие записи в таблице сессий;
 - секции `[tool.pytest.ini_options]` и `[tool.coverage.*]` в `pyproject.toml`;
 - `.pre-commit-config.yaml` — хуки на трёх стадиях (`pre-commit`, `commit-msg`, `pre-push`);
 - `.github/workflows/ci.yml` — CI на GitHub Actions.
@@ -117,6 +153,15 @@ pre-commit и CI реально работают: на них можно ссы�
 Dev-зависимости из `pyproject.toml` (группа `dev`): `pytest>=8.3`, `pytest-asyncio>=0.24`,
 `pytest-cov>=6.0`, `httpx>=0.27`, `ruff>=0.8`, `mypy>=1.13`. Пакетный менеджер — `uv`,
 всё запускается через `uv run`.
+
+Отдельно живёт группа `browser` (`playwright`): она нужна там, где реально запускают
+Chromium, — в образе `apps/api` (`docker/Dockerfile.api` ставит и группу, и сам движок
+через `playwright install --with-deps chromium`) и в CI. Локально —
+`uv sync --group browser && uv run playwright install chromium`. Образ `apps/worker` её не
+ставит: браузером он не пользуется. На тесты это влияет ровно одним способом: без группы
+пропускается `tests/integration/test_browser_playwright.py`, а юнит-тесты менеджера сессий
+работают в любом окружении — `libs/browser/session.py` про Playwright ничего не знает, а
+`libs/browser/backend.py` импортирует его лениво, при первом запуске браузера.
 
 Отдельно живёт группа `voice` (`openwakeword`, `sounddevice`, `faster-whisper`, `torch`):
 она ставится только на машине, где реально слушают микрофон и говорят в динамик, —
@@ -183,8 +228,9 @@ docker compose -f docker/docker-compose.yml up -d postgres redis
   Один event loop на весь прогон, поэтому сессионные async-фикстуры (`db_engine`) переживают
   отдельные тесты. У pytest-asyncio 1.x фикстуры `event_loop` больше нет — область цикла
   задаётся только этими двумя настройками;
-- зарегистрированные маркеры: `integration` (требует живых PostgreSQL/Redis) и `windows`
-  (требует Windows и live-сессии пользователя, `apps/executor`).
+- зарегистрированные маркеры: `integration` (требует живых PostgreSQL/Redis), `browser`
+  (требует Playwright с Chromium из группы `browser`) и `windows` (требует Windows и
+  live-сессии пользователя, `apps/executor`).
 
 ## Покрытие
 
@@ -242,6 +288,10 @@ PostgreSQL и Redis из `apps/api/main.py`. Роутам, которым нуж
   Помечаются `@pytest.mark.integration`.
 - Общие фикстуры — в `tests/conftest.py`, специфичные для подкаталога — в его собственном
   `conftest.py` (пока такого нет).
+- Тесты, которым нужен живой Chromium, помечаются `@pytest.mark.browser` и лежат в
+  `tests/integration/`: маркер `integration` в проекте означает живые PostgreSQL и Redis, а
+  браузеру нужен другой внешний движок — смешивать их в одном маркере значило бы требовать
+  базу там, где её нет.
 - `apps/executor` тестируется только на Windows: COM/win32com и Playwright с живым профилем
   не работают в контейнере и в CI на Linux. Такие тесты помечаются `@pytest.mark.windows` и
   пропускаются вне Windows — падать в общем прогоне они не должны.
@@ -300,7 +350,9 @@ pytest гоняются через `uv run`, теми же версиями, ч�
 
 Шаги по порядку:
 
-1. `astral-sh/setup-uv` с кэшем, `uv sync --dev`;
+1. `astral-sh/setup-uv` с кэшем, `uv sync --dev --group browser` и
+   `uv run playwright install --with-deps chromium` — Chromium ставится в CI, потому что
+   тесты жизненного цикла браузера гоняются на настоящем движке, а не на фейке;
 2. `uv run ruff check .` — линт;
 3. `uv run ruff format --check .` — форматирование;
 4. `uv run mypy apps libs` — типы;

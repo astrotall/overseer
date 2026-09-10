@@ -219,8 +219,19 @@ uv sync                       # dependencies, including the dev group
 uv run pytest                 # the whole suite
 uv run pytest tests/unit      # unit tests only, no infrastructure required
 uv run pytest -m integration  # integration tests only
+uv run pytest -m browser      # browser lifecycle tests only, on a real Chromium
 uv run pytest --cov --cov-report=term-missing   # with coverage
 ```
+
+The browser tests need Playwright, which lives in its own dependency group so that it does
+not weigh down every image:
+
+```bash
+uv sync --group browser && uv run playwright install chromium
+```
+
+Without it they are skipped locally; in CI (`CI` is set) they fail instead, because CI
+installs the engine on purpose.
 
 ### Layout
 
@@ -228,8 +239,9 @@ uv run pytest --cov --cov-report=term-missing   # with coverage
 - `tests/integration/` — with live PostgreSQL and Redis: repositories, endpoints, Arq tasks.
 - `tests/conftest.py` — shared fixtures.
 
-Tests that need the infrastructure are marked `@pytest.mark.integration`; tests that
-only work on Windows (`apps/executor`) are marked `@pytest.mark.windows`.
+Tests that need the infrastructure are marked `@pytest.mark.integration`; tests that need a
+real Chromium are marked `@pytest.mark.browser`; tests that only work on Windows
+(`apps/executor`) are marked `@pytest.mark.windows`.
 
 ### The test database
 
@@ -325,6 +337,12 @@ job; we do not merge a red CI.
   is persisted as a matching `tool_use` + `tool_result` pair, and the model is asked for
   the rest of the turn. There is no WebSocket envelope for answering yet;
 - ⏳ `apps/executor` (COM/Playwright) — an empty package with a README;
+- ✅ `libs/browser` — the Playwright session lifecycle (OVE-36): a headless Chromium started
+  lazily inside the `apps/api` process, one `BrowserContext` per conversation so that
+  cookies and logins survive across turns, a lease that keeps a context from being closed
+  under a running call, and a sweeper that closes idle contexts — and the browser itself
+  once the last one is gone. No browser tool uses it yet; those arrive with OVE-37/38.
+  Installed separately with `uv sync --group browser`;
 - ✅ `apps/voice` — the loop is closed (OVE-45 … OVE-48): capture through `sounddevice`,
   openWakeWord detection and utterance capture in a worker thread, energy-based
   endpointing, transcription with `faster-whisper`, a filter that refuses to forward an
