@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
 from apps.api.exception_handlers import register_exception_handlers
 from apps.api.routes import api_router
+from libs.browser import BrowserSessionManager, init_browser_manager, reset_browser_manager
 from libs.core.config import get_settings, validate_llm_provider_key
 from libs.core.logging import configure_logging, get_logger
 from libs.db.redis import close_redis, init_redis
@@ -14,6 +16,9 @@ from libs.db.session import close_engine, init_engine
 from libs.llm.base import LLMClient
 from libs.llm.factory import get_llm_client, reset_llm_client_cache
 from libs.tools import EchoTool, init_tool_registry, reset_tool_registry
+
+if TYPE_CHECKING:
+    from playwright.async_api import BrowserContext
 
 logger = get_logger(__name__)
 
@@ -25,6 +30,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings)
 
     llm_client: LLMClient | None = None
+    browser_manager: BrowserSessionManager[BrowserContext] | None = None
     try:
         init_engine(settings)
         redis = init_redis(settings)
@@ -32,10 +38,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         llm_client = get_llm_client(settings)
         tool_registry = init_tool_registry()
         tool_registry.register(EchoTool())
+        browser_manager = init_browser_manager(settings)
+        browser_manager.start_sweeper()
         logger.info("api.startup", env=settings.env, llm_provider=settings.llm_provider)
 
         yield
     finally:
+        if browser_manager is not None:
+            await browser_manager.aclose()
+        reset_browser_manager()
         if llm_client is not None:
             await llm_client.aclose()
         reset_llm_client_cache()

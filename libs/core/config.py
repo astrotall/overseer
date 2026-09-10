@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from libs.core.exceptions import ConfigurationError
@@ -61,6 +61,45 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     db_echo: bool = Field(default=False, description="Логировать SQL-запросы SQLAlchemy")
+
+    browser_headless: bool = Field(
+        default=True,
+        description=(
+            "Режим браузера Playwright. В Docker дисплея нет, headed там не запустится — "
+            "false ставят только для локальной отладки вне контейнера."
+        ),
+    )
+    browser_no_sandbox: bool = Field(
+        default=False,
+        description=(
+            "Отключить песочницу Chromium. Нужно только там, где процесс идёт от root "
+            "(образ apps/api), — вне контейнера песочницу не трогаем."
+        ),
+    )
+    browser_idle_ttl_seconds: int = Field(
+        default=10 * 60,
+        gt=0,
+        description="Сколько браузерный контекст живёт без единого вызова, прежде чем его закроют",
+    )
+    browser_sweep_interval_seconds: int = Field(
+        default=60,
+        gt=0,
+        description="Как часто сборщик проверяет контексты на простой",
+    )
+    browser_max_sessions: int = Field(
+        default=4,
+        gt=0,
+        description="Потолок одновременно открытых браузерных контекстов на процесс",
+    )
+
+    @model_validator(mode="after")
+    def _check_browser_sweep_interval(self) -> Self:
+        if self.browser_sweep_interval_seconds > self.browser_idle_ttl_seconds:
+            raise ValueError(
+                "browser_sweep_interval_seconds не может превышать browser_idle_ttl_seconds: "
+                "сборщик просыпался бы реже, чем истекает простой, и контекст жил бы дольше TTL"
+            )
+        return self
 
     @property
     def is_prod(self) -> bool:
