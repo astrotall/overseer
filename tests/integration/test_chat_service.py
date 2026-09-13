@@ -16,7 +16,7 @@ from apps.api.services import (
 from libs.db.repositories import ConversationRepository
 from libs.llm.base import ChatMessage, LLMClient, LLMResponse, ToolCall, ToolSpec
 from libs.llm.system_prompt import get_system_prompt_message
-from libs.tools import EchoTool, Tool, ToolRegistry, ToolResult
+from libs.tools import EchoArguments, EchoTool, Tool, ToolRegistry, ToolResult
 
 
 class FakeLLMClient(LLMClient):
@@ -290,7 +290,9 @@ class DangerousTool(Tool[DangerousArguments]):
     def __init__(self) -> None:
         self.executed = False
 
-    async def _execute(self, arguments: DangerousArguments) -> ToolResult:
+    async def _execute(
+        self, arguments: DangerousArguments, *, conversation_id: uuid.UUID
+    ) -> ToolResult:
         self.executed = True
         return ToolResult.ok(summary=f"Файл {arguments.path} удалён")
 
@@ -392,6 +394,35 @@ async def test_a_tool_call_is_executed_and_the_whole_turn_is_persisted(
     assert history[2].content is not None
     assert "привет" in history[2].content
     _assert_history_is_well_formed(history)
+
+
+class ConversationRecordingTool(EchoTool):
+    """`EchoTool`, который запоминает, в каком разговоре его вызвали."""
+
+    def __init__(self) -> None:
+        self.conversations: list[uuid.UUID] = []
+
+    async def _execute(self, arguments: EchoArguments, *, conversation_id: uuid.UUID) -> ToolResult:
+        self.conversations.append(conversation_id)
+        return await super()._execute(arguments, conversation_id=conversation_id)
+
+
+@pytest.mark.integration
+async def test_the_dispatcher_hands_every_tool_the_conversation_it_runs_in(
+    db_session: AsyncSession,
+) -> None:
+    first_id = await _new_conversation(db_session)
+    second_id = await _new_conversation(db_session)
+    tool = ConversationRecordingTool()
+    call = ToolCall(id="call-1", name="echo", arguments={"text": "привет"})
+
+    for conversation_id in (first_id, second_id):
+        llm_client = ScriptedLLMClient([_tool_use(call), _final("готово")])
+        await ChatService(db_session, llm_client, tool_registry=_registry(tool)).send_message(
+            conversation_id, "скажи привет"
+        )
+
+    assert tool.conversations == [first_id, second_id]
 
 
 @pytest.mark.integration

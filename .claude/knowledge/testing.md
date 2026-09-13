@@ -92,6 +92,36 @@
 
   Разбор, что именно этим проверяется и почему без seccomp-профиля Chromium не стартует, —
   в [architecture.md](architecture.md), раздел «Песочница Chromium»;
+- `tests/integration/test_web_search_tool.py` — инструмент `web_search` (OVE-37) на **живом
+  Chromium**, `@pytest.mark.browser`, с той же политикой, что у OVE-36: без Chromium — пропуск,
+  под `CI` — исходная ошибка. Менеджер ставится процессным синглтоном `init_browser_manager()`,
+  то есть инструмент идёт через настоящий `browser_context(conversation_id)`, а не через
+  подменённый. Почти все тесты гоняются не против DuckDuckGo, а против локального
+  `FakeDuckDuckGo` (`ThreadingHTTPServer` в потоке) с разметкой, повторяющей HTML-версию DDG:
+  форма результата (реклама и дубликаты отброшены, редирект `uddg` раскрыт, потолок
+  `MAX_RESULTS`), закрытая после вызова страница, anti-bot страница и `403` как
+  `SEARCH_BLOCKED_TEXT` (а не «ничего не нашлось»), неизвестная вёрстка как
+  `UNRECOGNIZED_PAGE_TEXT`, `500` — ошибка со статусом, закрытый порт —
+  `SEARCH_UNAVAILABLE_TEXT`. Проброс `conversation_id` до `browser_context()` проверяется
+  **куками, а не счётчиком вызовов**: сервер выдаёт cookie на первом запросе и записывает, с
+  какой cookie пришёл второй, — повторный поиск того же разговора приходит со своей cookie,
+  поиск другого разговора — без неё, и `active_sessions` растёт на одну и на две сессии
+  соответственно. Один тест — **живой** поиск на `html.duckduckgo.com`: проверяется только
+  форма (от одного до `MAX_RESULTS` результатов, непустой заголовок, http(s)-ссылка не на
+  duckduckgo.com), а не содержимое. **Он никогда не запускается в CI** —
+  `@pytest.mark.skipif(os.getenv("CI") is not None, ...)` снимает его с прогона на этапе сбора
+  тестов, до единого сетевого обращения, независимо от того, ответит ли DDG с этого раннера
+  блокировкой, успехом или сетевой ошибкой: раннер без sandbox (см. «Песочница Chromium» в
+  [architecture.md](architecture.md)) не должен зависеть от того, отклонит ли DDG именно его —
+  это чужое антибот-поведение, а не решение о безопасности CI. Локально поведение прежнее:
+  распознанная блокировка (`SEARCH_BLOCKED_TEXT`) и сетевая недоступность — `SKIPPED` с
+  объяснением, а нераспознанная страница по-прежнему падает — это поломка разбора, а не сети.
+  Чистая часть — `tests/unit/test_web_search.py`: схема, которую видит
+  модель (только `query`), раскрытие ссылок и разбор сырых результатов без браузера. Проброс
+  `conversation_id` сквозь протокол держит `test_tool_protocol.py`, сквозь диспетчер —
+  `test_the_dispatcher_hands_every_tool_the_conversation_it_runs_in` в
+  `test_chat_service.py`, регистрацию в `lifespan` — `test_api_startup.py`. Разбор выбора
+  поисковика — в [architecture.md](architecture.md), раздел «Инструмент `web_search`»;
 - `tests/unit/` — юнит-тесты бизнес-логики: конфиг, LLM-клиенты и фабрика, контракт
   `libs/llm/base.py`, протокол инструмента `libs/tools/base.py` (`test_tool_protocol.py`:
   прямой вызов `EchoTool`, построение `ToolSpec`, ошибки аргументов и исключение внутри
@@ -159,7 +189,8 @@ Chromium, — в образе `apps/api` (`docker/Dockerfile.api` ставит �
 через `playwright install --with-deps chromium`) и в CI. Локально —
 `uv sync --group browser && uv run playwright install chromium`. Образ `apps/worker` её не
 ставит: браузером он не пользуется. На тесты это влияет ровно одним способом: без группы
-пропускается `tests/integration/test_browser_playwright.py`, а юнит-тесты менеджера сессий
+пропускаются `tests/integration/test_browser_playwright.py` и
+`tests/integration/test_web_search_tool.py`, а юнит-тесты менеджера сессий и разбора выдачи
 работают в любом окружении — `libs/browser/session.py` про Playwright ничего не знает, а
 `libs/browser/backend.py` импортирует его лениво, при первом запуске браузера.
 

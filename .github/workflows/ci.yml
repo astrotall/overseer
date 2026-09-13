@@ -45,9 +45,12 @@ jobs:
       REDIS_URL: redis://localhost:6379/0
       # Ubuntu 24.04 (ubuntu-latest) ограничивает непривилегированные user
       # namespace'ы через AppArmor, а без них песочница Chromium не поднимается.
-      # Браузерные тесты здесь открывают только локальный set_content, никакого
-      # недоверенного контента; сама песочница проверяется в образе apps/api,
-      # где она и нужна, — см. .claude/knowledge/architecture.md.
+      # Браузерные тесты здесь открывают только локальный контент: set_content и
+      # локальный фейк поисковика. Живой тест web_search (OVE-37) против настоящего
+      # html.duckduckgo.com помечен skipif(CI) и в CI не запускается вовсе — раннер
+      # без sandbox не должен зависеть от антибот-поведения стороннего сайта; сама
+      # песочница проверяется в образе apps/api, где она и нужна, —
+      # см. .claude/knowledge/architecture.md.
       BROWSER_NO_SANDBOX: "true"
 
     steps:

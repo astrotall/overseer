@@ -94,7 +94,7 @@ class BoomTool(Tool[BoomArguments]):
     description = "Инструмент для проверки полного хода при падении инструмента внутри."
     arguments_model = BoomArguments
 
-    async def _execute(self, arguments: BoomArguments) -> ToolResult:
+    async def _execute(self, arguments: BoomArguments, *, conversation_id: uuid.UUID) -> ToolResult:
         raise RuntimeError("буум изнутри инструмента")
 
 
@@ -113,7 +113,9 @@ class DangerousTool(Tool[DangerousArguments]):
     def __init__(self) -> None:
         self.executed = False
 
-    async def _execute(self, arguments: DangerousArguments) -> ToolResult:
+    async def _execute(
+        self, arguments: DangerousArguments, *, conversation_id: uuid.UUID
+    ) -> ToolResult:
         self.executed = True
         return ToolResult.ok(summary=f"Файл {arguments.path} удалён")
 

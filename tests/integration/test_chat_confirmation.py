@@ -53,7 +53,9 @@ class DangerousTool(Tool[DangerousArguments]):
     def __init__(self) -> None:
         self.executed = False
 
-    async def _execute(self, arguments: DangerousArguments) -> ToolResult:
+    async def _execute(
+        self, arguments: DangerousArguments, *, conversation_id: uuid.UUID
+    ) -> ToolResult:
         self.executed = True
         return ToolResult.ok(summary=f"Файл {arguments.path} удалён")
 
@@ -197,9 +199,9 @@ class CountingEchoTool(EchoTool):
     def __init__(self) -> None:
         self.executions = 0
 
-    async def _execute(self, arguments: EchoArguments) -> ToolResult:
+    async def _execute(self, arguments: EchoArguments, *, conversation_id: uuid.UUID) -> ToolResult:
         self.executions += 1
-        return await super()._execute(arguments)
+        return await super()._execute(arguments, conversation_id=conversation_id)
 
 
 @pytest.mark.integration

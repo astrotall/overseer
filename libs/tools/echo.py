@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from libs.tools.base import Tool, ToolResult
@@ -19,5 +21,5 @@ class EchoTool(Tool[EchoArguments]):
     )
     arguments_model = EchoArguments
 
-    async def _execute(self, arguments: EchoArguments) -> ToolResult:
+    async def _execute(self, arguments: EchoArguments, *, conversation_id: uuid.UUID) -> ToolResult:
         return ToolResult.ok(summary=arguments.text, data={"text": arguments.text})

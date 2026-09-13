@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -14,6 +15,8 @@ from libs.core.exceptions import ConfigurationError
 from libs.llm import ToolCall, ToolSpec
 from libs.tools import EchoArguments, EchoTool, Tool, ToolResult
 from libs.tools.base import MAX_DESCRIBED_ARGUMENTS_CHARS
+
+CONVERSATION_ID = uuid.UUID("00000000-0000-0000-0000-000000000037")
 
 
 class BoomArguments(BaseModel):
@@ -34,7 +37,7 @@ class BoomTool(Tool[BoomArguments]):
     requires_confirmation = True
     arguments_model = BoomArguments
 
-    async def _execute(self, arguments: BoomArguments) -> ToolResult:
+    async def _execute(self, arguments: BoomArguments, *, conversation_id: uuid.UUID) -> ToolResult:
         raise RuntimeError(SENSITIVE_FAILURE)
 
 
@@ -46,7 +49,7 @@ class CrashingTool(Tool[BoomArguments]):
     def __init__(self, failure: BaseException) -> None:
         self._failure = failure
 
-    async def _execute(self, arguments: BoomArguments) -> ToolResult:
+    async def _execute(self, arguments: BoomArguments, *, conversation_id: uuid.UUID) -> ToolResult:
         raise self._failure
 
 
@@ -57,7 +60,9 @@ def captured_logs() -> Iterator[list[EventDict]]:
 
 
 async def test_echo_returns_the_text_it_received() -> None:
-    result = await EchoTool().execute({"text": "собери отчёт за август"})
+    result = await EchoTool().execute(
+        {"text": "собери отчёт за август"}, conversation_id=CONVERSATION_ID
+    )
 
     assert result == ToolResult(
         status="ok",
@@ -70,7 +75,7 @@ async def test_echo_returns_the_text_it_received() -> None:
 async def test_a_tool_call_from_the_llm_is_executed_without_unpacking_arguments() -> None:
     call = ToolCall(id="call_1", name="echo", arguments={"text": "привет"})
 
-    result = await EchoTool().execute(call.arguments)
+    result = await EchoTool().execute(call.arguments, conversation_id=CONVERSATION_ID)
 
     assert result.status == "ok"
     assert result.data == {"text": "привет"}
@@ -91,6 +96,43 @@ def test_confirmation_is_off_unless_the_tool_asks_for_it() -> None:
     assert BoomTool.requires_confirmation is True
 
 
+class ConversationAwareTool(EchoTool):
+    name = "conversation_aware"
+
+    def __init__(self) -> None:
+        self.seen: list[uuid.UUID] = []
+
+    async def _execute(self, arguments: EchoArguments, *, conversation_id: uuid.UUID) -> ToolResult:
+        self.seen.append(conversation_id)
+        return await super()._execute(arguments, conversation_id=conversation_id)
+
+
+async def test_the_conversation_reaches_the_tool_beside_the_arguments_not_inside_them() -> None:
+    tool = ConversationAwareTool()
+
+    await tool.execute({"text": "привет"}, conversation_id=CONVERSATION_ID)
+
+    assert tool.seen == [CONVERSATION_ID]
+
+
+async def test_a_model_cannot_smuggle_the_conversation_in_through_the_arguments() -> None:
+    tool = ConversationAwareTool()
+
+    result = await tool.execute(
+        {"text": "привет", "conversation_id": str(uuid.uuid4())},
+        conversation_id=CONVERSATION_ID,
+    )
+
+    assert result.is_error
+    assert tool.seen == []
+
+
+def test_the_conversation_is_not_part_of_the_schema_the_model_sees() -> None:
+    spec = ConversationAwareTool().to_spec()
+
+    assert "conversation_id" not in spec.input_schema["properties"]
+
+
 @pytest.mark.parametrize(
     ("name", "arguments"),
     [
@@ -103,7 +145,7 @@ def test_confirmation_is_off_unless_the_tool_asks_for_it() -> None:
 async def test_arguments_the_model_got_wrong_come_back_as_an_error_result(
     name: str, arguments: dict[str, Any]
 ) -> None:
-    result = await EchoTool().execute(arguments)
+    result = await EchoTool().execute(arguments, conversation_id=CONVERSATION_ID)
 
     assert result.is_error
     assert result.error
@@ -112,7 +154,7 @@ async def test_arguments_the_model_got_wrong_come_back_as_an_error_result(
 
 
 async def test_an_exception_inside_a_tool_comes_back_as_an_error_result() -> None:
-    result = await BoomTool().execute({"value": 1})
+    result = await BoomTool().execute({"value": 1}, conversation_id=CONVERSATION_ID)
 
     assert result.is_error
     assert result.error is not None
@@ -121,7 +163,7 @@ async def test_an_exception_inside_a_tool_comes_back_as_an_error_result() -> Non
 
 
 async def test_what_the_exception_said_never_reaches_the_model() -> None:
-    result = await BoomTool().execute({"value": 1})
+    result = await BoomTool().execute({"value": 1}, conversation_id=CONVERSATION_ID)
 
     assert result.error is not None
     assert SENSITIVE_FAILURE not in result.error
@@ -131,15 +173,19 @@ async def test_what_the_exception_said_never_reaches_the_model() -> None:
 
 
 async def test_the_message_is_the_same_no_matter_what_went_wrong() -> None:
-    one = await CrashingTool(OSError(SENSITIVE_FAILURE)).execute({"value": 1})
-    another = await CrashingTool(TimeoutError("word.exe не ответил за 30 с")).execute({"value": 1})
+    one = await CrashingTool(OSError(SENSITIVE_FAILURE)).execute(
+        {"value": 1}, conversation_id=CONVERSATION_ID
+    )
+    another = await CrashingTool(TimeoutError("word.exe не ответил за 30 с")).execute(
+        {"value": 1}, conversation_id=CONVERSATION_ID
+    )
 
     assert one == another
 
 
 async def test_a_bug_inside_a_tool_is_logged_with_a_full_traceback() -> None:
     with captured_logs() as entries:
-        result = await BoomTool().execute({"value": 1})
+        result = await BoomTool().execute({"value": 1}, conversation_id=CONVERSATION_ID)
 
     (entry,) = entries
     assert entry["event"] == "tool.execution_failed"
@@ -154,7 +200,10 @@ async def test_a_bug_inside_a_tool_is_logged_with_a_full_traceback() -> None:
 
 async def test_arguments_the_model_got_wrong_are_logged_without_a_traceback() -> None:
     with captured_logs() as entries:
-        await EchoTool().execute({"text": "привет", "note": "пароль от почты — hunter2"})
+        await EchoTool().execute(
+            {"text": "привет", "note": "пароль от почты — hunter2"},
+            conversation_id=CONVERSATION_ID,
+        )
 
     (entry,) = entries
     assert entry["event"] == "tool.invalid_arguments"
@@ -178,7 +227,7 @@ async def test_a_broken_runtime_is_not_disguised_as_a_tool_error(
     name: str, failure: Exception
 ) -> None:
     with captured_logs() as entries, pytest.raises(type(failure)):
-        await CrashingTool(failure).execute({"value": 1})
+        await CrashingTool(failure).execute({"value": 1}, conversation_id=CONVERSATION_ID)
 
     (entry,) = entries
     assert entry["event"] == "tool.execution_crashed"
@@ -189,7 +238,9 @@ async def test_a_broken_runtime_is_not_disguised_as_a_tool_error(
 
 async def test_stopping_the_process_is_not_a_tool_error_either() -> None:
     with captured_logs() as entries, pytest.raises(asyncio.CancelledError):
-        await CrashingTool(asyncio.CancelledError()).execute({"value": 1})
+        await CrashingTool(asyncio.CancelledError()).execute(
+            {"value": 1}, conversation_id=CONVERSATION_ID
+        )
 
     assert entries == []
 
@@ -200,12 +251,14 @@ async def test_a_tool_never_sees_arguments_it_did_not_declare() -> None:
     class SpyTool(EchoTool):
         name = "spy"
 
-        async def _execute(self, arguments: EchoArguments) -> ToolResult:
+        async def _execute(
+            self, arguments: EchoArguments, *, conversation_id: uuid.UUID
+        ) -> ToolResult:
             seen.append(arguments)
-            return await super()._execute(arguments)
+            return await super()._execute(arguments, conversation_id=conversation_id)
 
-    await SpyTool().execute({"text": "привет"})
-    await SpyTool().execute({"text": 1})
+    await SpyTool().execute({"text": "привет"}, conversation_id=CONVERSATION_ID)
+    await SpyTool().execute({"text": 1}, conversation_id=CONVERSATION_ID)
 
     assert seen == [EchoArguments(text="привет")]
 
@@ -217,7 +270,9 @@ def test_a_tool_that_forgot_to_declare_its_contract_does_not_import() -> None:
             name = "nameless"
             description = "не объявил модель аргументов"
 
-            async def _execute(self, arguments: EchoArguments) -> ToolResult:
+            async def _execute(
+                self, arguments: EchoArguments, *, conversation_id: uuid.UUID
+            ) -> ToolResult:
                 return ToolResult.ok(summary=arguments.text)
 
 
@@ -263,7 +318,7 @@ class NamedTool(Tool[EchoArguments]):
     def describe_call(self, arguments: dict[str, Any]) -> str:
         return f"Сказать вслух «{arguments['text']}»"
 
-    async def _execute(self, arguments: EchoArguments) -> ToolResult:
+    async def _execute(self, arguments: EchoArguments, *, conversation_id: uuid.UUID) -> ToolResult:
         return ToolResult.ok(summary=arguments.text)
 
 

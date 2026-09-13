@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar, Generic, Literal, Self, TypeVar
 
@@ -86,7 +87,7 @@ class Tool(ABC, Generic[ArgumentsT]):
     def describe_call(self, arguments: dict[str, Any]) -> str:
         return f"{self.description} Вызов: {self.name}({_render_arguments(arguments)})"
 
-    async def execute(self, arguments: dict[str, Any]) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], *, conversation_id: uuid.UUID) -> ToolResult:
         try:
             parsed = self.arguments_model.model_validate(arguments)
         except ValidationError as exc:
@@ -101,7 +102,7 @@ class Tool(ABC, Generic[ArgumentsT]):
             )
 
         try:
-            return await self._execute(parsed)
+            return await self._execute(parsed, conversation_id=conversation_id)
         except RUNTIME_FAILURES:
             logger.exception("tool.execution_crashed", tool=self.name)
             raise
@@ -113,7 +114,9 @@ class Tool(ABC, Generic[ArgumentsT]):
             )
 
     @abstractmethod
-    async def _execute(self, arguments: ArgumentsT) -> ToolResult: ...
+    async def _execute(
+        self, arguments: ArgumentsT, *, conversation_id: uuid.UUID
+    ) -> ToolResult: ...
 
 
 def _render_arguments(arguments: dict[str, Any]) -> str:

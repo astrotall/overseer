@@ -57,7 +57,9 @@ class DangerousTool(Tool[DangerousArguments]):
     def __init__(self) -> None:
         self.deleted: list[str] = []
 
-    async def _execute(self, arguments: DangerousArguments) -> ToolResult:
+    async def _execute(
+        self, arguments: DangerousArguments, *, conversation_id: uuid.UUID
+    ) -> ToolResult:
         self.deleted.append(arguments.path)
         return ToolResult.ok(summary=f"Файл {arguments.path} удалён")
 
