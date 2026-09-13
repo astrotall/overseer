@@ -6,14 +6,18 @@ from libs.tools.registry import (
     init_tool_registry,
     reset_tool_registry,
 )
+from libs.tools.web_search import SearchResult, WebSearchArguments, WebSearchTool
 
 __all__ = [
     "EchoArguments",
     "EchoTool",
+    "SearchResult",
     "Tool",
     "ToolRegistry",
     "ToolResult",
     "ToolStatus",
+    "WebSearchArguments",
+    "WebSearchTool",
     "get_tool_registry",
     "init_tool_registry",
     "reset_tool_registry",

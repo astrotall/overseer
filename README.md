@@ -327,8 +327,11 @@ job; we do not merge a red CI.
 - ⏳ ORM models — empty, a stub;
 - ⏳ LLM clients — interfaces only, generation is not implemented;
 - ⏳ tool calling — the tool protocol (`libs/tools/base.py`), the registry
-  (`libs/tools/registry.py`) and the dispatch loop inside `ChatService` are in place;
-  no real tool exists yet — only the reference `EchoTool`. A call to a tool that
+  (`libs/tools/registry.py`) and the dispatch loop inside `ChatService` are in place.
+  The first real tool is `web_search` (OVE-37): a search through the HTML version of
+  DuckDuckGo in the conversation's headless browser session, returning up to 8 results
+  (title, URL, snippet). Tools receive the turn's `conversation_id` as system context,
+  next to — never inside — the arguments the model sends. A call to a tool that
   requires confirmation now pauses the turn instead of running: the pending action is
   stored in Redis and both transports report it distinctly (`202` with a
   `confirmation_id` over REST, a `confirmation_required` envelope over the WebSocket).
@@ -341,7 +344,8 @@ job; we do not merge a red CI.
   lazily inside the `apps/api` process, one `BrowserContext` per conversation so that
   cookies and logins survive across turns, a lease that keeps a context from being closed
   under a running call, and a sweeper that closes idle contexts — and the browser itself
-  once the last one is gone. No browser tool uses it yet; those arrive with OVE-37/38.
+  once the last one is gone. `web_search` (OVE-37) is the first tool built on it; the next
+  browser tool arrives with OVE-38.
   Installed separately with `uv sync --group browser`;
 - ✅ `apps/voice` — the loop is closed (OVE-45 … OVE-48): capture through `sounddevice`,
   openWakeWord detection and utterance capture in a worker thread, energy-based

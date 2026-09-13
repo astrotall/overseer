@@ -262,7 +262,7 @@ class ChatService:
                 f"Инструмента '{call.name}' не существует. Выбери инструмент из списка доступных."
             )
 
-        result = await tool.execute(call.arguments)
+        result = await tool.execute(call.arguments, conversation_id=conversation_id)
         self._log_call_finished(conversation_id, tool.name, call, result)
         return result
 

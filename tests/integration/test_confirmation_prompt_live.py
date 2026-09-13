@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,7 +33,9 @@ class DeleteFileTool(Tool[DeleteFileArguments]):
     arguments_model = DeleteFileArguments
     requires_confirmation = True
 
-    async def _execute(self, arguments: DeleteFileArguments) -> ToolResult:
+    async def _execute(
+        self, arguments: DeleteFileArguments, *, conversation_id: uuid.UUID
+    ) -> ToolResult:
         return ToolResult.ok(summary=f"Файл {arguments.path} удалён")
 
 

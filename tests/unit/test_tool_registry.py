@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from pydantic import BaseModel, ConfigDict
 
@@ -19,7 +21,9 @@ class OtherEchoTool(Tool[OtherArguments]):
     description = "Другой инструмент, случайно объявивший то же имя"
     arguments_model = OtherArguments
 
-    async def _execute(self, arguments: OtherArguments) -> ToolResult:
+    async def _execute(
+        self, arguments: OtherArguments, *, conversation_id: uuid.UUID
+    ) -> ToolResult:
         return ToolResult.ok(summary=str(arguments.value))
 
 

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from apps.api.main import lifespan
 from libs.core.config import Settings
 from libs.core.exceptions import ConfigurationError
+from libs.tools import WebSearchTool, get_tool_registry
 from libs.tools.registry import ToolRegistry
 
 
@@ -78,3 +79,24 @@ def test_api_shutdown_closes_resources_when_tool_registration_fails(
     assert llm_client.closed is True
     assert engine_closed is True
     assert redis_closed is True
+
+
+def test_api_startup_registers_the_web_search_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(llm_provider="deepseek", deepseek_api_key="test-key")
+    monkeypatch.setattr("apps.api.main.get_settings", lambda: settings)
+    monkeypatch.setattr("apps.api.main.validate_llm_provider_key", lambda _settings: None)
+    monkeypatch.setattr("apps.api.main.configure_logging", lambda _settings: None)
+    monkeypatch.setattr("apps.api.main.init_engine", lambda _settings: None)
+    monkeypatch.setattr("apps.api.main.init_redis", lambda _settings: FakeRedis())
+    monkeypatch.setattr("apps.api.main.get_llm_client", lambda _settings: FakeLLMClient())
+
+    async def noop() -> None:
+        return None
+
+    monkeypatch.setattr("apps.api.main.close_engine", noop)
+    monkeypatch.setattr("apps.api.main.close_redis", noop)
+
+    with TestClient(FastAPI(lifespan=lifespan)):
+        registry = get_tool_registry()
+        assert isinstance(registry.get("web_search"), WebSearchTool)
+        assert {spec.name for spec in registry.list_specs()} == {"echo", "web_search"}
