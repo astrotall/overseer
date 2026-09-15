@@ -1,30 +1,71 @@
 from __future__ import annotations
 
+import ipaddress
 import os
+import socket
 import threading
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 
-from libs.browser import browser_context, init_browser_manager, reset_browser_manager
+from libs.browser import (
+    EgressGuard,
+    browser_context,
+    init_browser_manager,
+    reset_browser_manager,
+)
+from libs.browser.egress import IPAddress
 from libs.browser.session import BrowserSessionManager
 from libs.core.config import Settings
 from libs.tools import OpenPageTool
-from libs.tools.open_page import NOT_HTML_TEXT, PAGE_UNAVAILABLE_TEXT
+from libs.tools.open_page import (
+    BLOCKED_ADDRESS_TEXT,
+    EXTRACT_LIMITS,
+    EXTRACT_PAGE_JS,
+    MAX_CONTENT_CHARS,
+    MAX_PARAGRAPHS,
+    MAX_TITLE_CHARS,
+    NOT_HTML_TEXT,
+    PAGE_UNAVAILABLE_TEXT,
+    build_page_summary,
+    extract_page,
+)
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext
 
 pytestmark = pytest.mark.browser
 
+LOOPBACK = ipaddress.IPv4Address("127.0.0.1")
+
 KNOWN_TITLE = "Example Domain"
 KNOWN_PARAGRAPH_1 = "This is a page used for illustrative examples in documents."
 KNOWN_PARAGRAPH_2 = "You may use this page without needing permission."
+
+REACH_INTERNAL_JS = """
+async (url) => {
+  const fetched = await fetch(url, { mode: "no-cors" }).then(() => "reached", () => "refused");
+  const socket = await new Promise((resolve) => {
+    const ws = new WebSocket(url.replace("http", "ws"));
+    ws.onopen = () => resolve("reached");
+    ws.onerror = () => resolve("refused");
+  });
+  const image = await new Promise((resolve) => {
+    const img = document.createElement("img");
+    img.onload = () => resolve("reached");
+    img.onerror = () => resolve("refused");
+    img.src = url;
+    document.body.appendChild(img);
+  });
+  return { fetched, socket, image };
+}
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,20 +94,33 @@ PAGES: dict[str, tuple[int, str, str]] = {
 }
 
 
+class _IPv6HTTPServer(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
 class FakePageServer:
-    def __init__(self) -> None:
+    def __init__(self, host: str = "127.0.0.1") -> None:
         self.requests: list[SeenRequest] = []
+        self._host = host
         self._lock = threading.Lock()
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        server_class = _IPv6HTTPServer if ":" in host else ThreadingHTTPServer
+        self._server = server_class((host, 0), self._handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
     @property
+    def port(self) -> int:
+        return int(self._server.server_address[1])
+
+    @property
     def base_url(self) -> str:
-        host, port = self._server.server_address[:2]
-        return f"http://{host!s}:{port}"
+        host = f"[{self._host}]" if ":" in self._host else self._host
+        return f"http://{host}:{self.port}"
 
     def url(self, path: str) -> str:
         return f"{self.base_url}{path}"
+
+    def redirect_url(self, target: str) -> str:
+        return self.url(f"/redirect?to={quote(target, safe='')}")
 
     def start(self) -> None:
         self._thread.start()
@@ -84,14 +138,24 @@ class FakePageServer:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
+                parts = urlsplit(self.path)
                 cookies = SimpleCookie(self.headers.get("Cookie", ""))
                 visitor = cookies["visitor"].value if "visitor" in cookies else None
                 issued = None if visitor else uuid.uuid4().hex
 
                 with fake._lock:
-                    fake.requests.append(SeenRequest(self.path, visitor, issued))
+                    fake.requests.append(SeenRequest(parts.path, visitor, issued))
 
-                status, content_type, body = PAGES[self.path]
+                if parts.path == "/redirect":
+                    self.send_response(302)
+                    self.send_header("Location", parse_qs(parts.query)["to"][0])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+
+                status, content_type, body = PAGES.get(
+                    parts.path, (404, "text/html; charset=utf-8", "<html></html>")
+                )
                 payload = body.encode()
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
@@ -107,6 +171,21 @@ class FakePageServer:
         return Handler
 
 
+class FakeResolver:
+    def __init__(self) -> None:
+        self._answers: dict[str, list[Sequence[str]]] = {}
+
+    def answer(self, host: str, *answers: Sequence[str]) -> None:
+        self._answers[host] = list(answers)
+
+    async def __call__(self, host: str, port: int) -> list[IPAddress]:
+        queue = self._answers.get(host)
+        if not queue:
+            raise OSError(f"неизвестное имя {host}")
+        answer = queue.pop(0) if len(queue) > 1 else queue[0]
+        return [ipaddress.ip_address(address) for address in answer]
+
+
 @pytest.fixture
 def page_server() -> Iterator[FakePageServer]:
     server = FakePageServer()
@@ -116,11 +195,40 @@ def page_server() -> Iterator[FakePageServer]:
 
 
 @pytest.fixture
-async def browser_manager(
-    settings: Settings,
-) -> AsyncIterator[BrowserSessionManager[BrowserContext]]:
+def internal_server() -> Iterator[FakePageServer]:
+    server = FakePageServer()
+    server.start()
+    yield server
+    server.stop()
+
+
+@pytest.fixture
+def internal_ipv6_server() -> Iterator[FakePageServer]:
+    try:
+        server = FakePageServer("::1")
+    except OSError as exc:
+        pytest.skip(f"IPv6 loopback недоступен: {exc}")
+    server.start()
+    yield server
+    server.stop()
+
+
+@pytest.fixture
+def closed_port() -> int:
+    with ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler) as server:
+        return int(server.server_address[1])
+
+
+@pytest.fixture
+def resolver() -> FakeResolver:
+    return FakeResolver()
+
+
+async def _started_manager(
+    settings: Settings, guard: EgressGuard | None
+) -> BrowserSessionManager[BrowserContext]:
     reset_browser_manager()
-    manager = init_browser_manager(settings)
+    manager = init_browser_manager(settings, egress_guard=guard)
     try:
         async with manager.acquire(uuid.uuid4()):
             pass
@@ -130,7 +238,27 @@ async def browser_manager(
         if os.getenv("CI"):
             raise
         pytest.skip(f"Chromium недоступен: {exc}")
+    return manager
 
+
+@pytest.fixture
+async def browser_manager(
+    settings: Settings, page_server: FakePageServer, closed_port: int, resolver: FakeResolver
+) -> AsyncIterator[BrowserSessionManager[BrowserContext]]:
+    guard = EgressGuard(
+        resolver=resolver, exempt={(LOOPBACK, page_server.port), (LOOPBACK, closed_port)}
+    )
+    manager = await _started_manager(settings, guard)
+    yield manager
+    await manager.aclose()
+    reset_browser_manager()
+
+
+@pytest.fixture
+async def public_browser_manager(
+    settings: Settings,
+) -> AsyncIterator[BrowserSessionManager[BrowserContext]]:
+    manager = await _started_manager(settings, None)
     yield manager
     await manager.aclose()
     reset_browser_manager()
@@ -236,12 +364,198 @@ async def test_non_html_content_is_a_clear_failure_not_a_crash(page_server: Fake
 
 
 @pytest.mark.usefixtures("browser_manager")
-async def test_an_unreachable_url_is_an_error_not_a_crash() -> None:
-    with ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler) as server:
-        host, port = server.server_address[:2]
-    closed_port_url = f"http://{host!s}:{port}/known"
-
-    result = await OpenPageTool().execute({"url": closed_port_url}, conversation_id=uuid.uuid4())
+async def test_an_unreachable_url_is_an_error_not_a_crash(closed_port: int) -> None:
+    result = await OpenPageTool().execute(
+        {"url": f"http://127.0.0.1:{closed_port}/known"}, conversation_id=uuid.uuid4()
+    )
 
     assert result.is_error
     assert result.error == PAGE_UNAVAILABLE_TEXT
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_a_loopback_address_is_refused_and_never_contacted(
+    internal_server: FakePageServer,
+) -> None:
+    result = await OpenPageTool().execute(
+        {"url": internal_server.url("/known")}, conversation_id=uuid.uuid4()
+    )
+
+    assert result.error == BLOCKED_ADDRESS_TEXT
+    assert internal_server.requests == []
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_ipv6_loopback_is_refused_and_never_contacted(
+    internal_ipv6_server: FakePageServer,
+) -> None:
+    result = await OpenPageTool().execute(
+        {"url": internal_ipv6_server.url("/known")}, conversation_id=uuid.uuid4()
+    )
+
+    assert result.error == BLOCKED_ADDRESS_TEXT
+    assert internal_ipv6_server.requests == []
+
+
+@pytest.mark.usefixtures("browser_manager")
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://10.0.0.1/",
+        "http://172.17.0.1/",
+        "http://192.168.0.1/",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://0.0.0.0/",
+        "http://[::]/",
+        "http://[fd12:3456::1]/",
+        "http://[fc00::1]:5432/",
+        "http://[fe80::1]/",
+        "http://[::ffff:127.0.0.1]/",
+        "http://[::ffff:172.18.0.2]:6379/",
+    ],
+)
+async def test_private_link_local_and_mapped_addresses_are_refused(url: str) -> None:
+    result = await OpenPageTool().execute({"url": url}, conversation_id=uuid.uuid4())
+
+    assert result.error == BLOCKED_ADDRESS_TEXT
+
+
+@pytest.mark.usefixtures("browser_manager")
+@pytest.mark.parametrize(
+    "answers",
+    [["127.0.0.1"], ["::1"], ["fd12:3456::1"], ["172.18.0.2"], ["93.184.215.14", "127.0.0.1"]],
+    ids=["loopback", "ipv6-loopback", "ipv6-unique-local", "docker-network", "mixed-answer"],
+)
+async def test_a_domain_that_resolves_into_the_internal_network_is_refused(
+    internal_server: FakePageServer, resolver: FakeResolver, answers: list[str]
+) -> None:
+    resolver.answer("evil.test", answers)
+
+    result = await OpenPageTool().execute(
+        {"url": f"http://evil.test:{internal_server.port}/known"}, conversation_id=uuid.uuid4()
+    )
+
+    assert result.error == BLOCKED_ADDRESS_TEXT
+    assert internal_server.requests == []
+
+
+@pytest.mark.usefixtures("browser_manager")
+@pytest.mark.parametrize("target", ["ip", "domain", "ipv6"])
+async def test_a_redirect_into_the_internal_network_is_refused_at_the_redirect(
+    page_server: FakePageServer,
+    internal_server: FakePageServer,
+    resolver: FakeResolver,
+    target: str,
+) -> None:
+    resolver.answer("evil.test", ["127.0.0.1"])
+    internal_urls = {
+        "ip": internal_server.url("/known"),
+        "domain": f"http://evil.test:{internal_server.port}/known",
+        "ipv6": f"http://[::1]:{internal_server.port}/known",
+    }
+
+    result = await OpenPageTool().execute(
+        {"url": page_server.redirect_url(internal_urls[target])}, conversation_id=uuid.uuid4()
+    )
+
+    assert result.error == BLOCKED_ADDRESS_TEXT
+    assert len(page_server.seen("/redirect")) == 1
+    assert internal_server.requests == []
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_dns_rebinding_between_the_check_and_the_connection_is_refused(
+    page_server: FakePageServer, resolver: FakeResolver
+) -> None:
+    resolver.answer("rebind.test", ["127.0.0.1"], ["127.0.0.2"])
+
+    result = await OpenPageTool().execute(
+        {"url": f"http://rebind.test:{page_server.port}/known"}, conversation_id=uuid.uuid4()
+    )
+
+    assert result.error == BLOCKED_ADDRESS_TEXT
+    assert page_server.requests == []
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_the_browser_itself_cannot_reach_the_internal_network(
+    page_server: FakePageServer, internal_server: FakePageServer, resolver: FakeResolver
+) -> None:
+    from playwright.async_api import Error as PlaywrightError
+
+    resolver.answer("evil.test", ["127.0.0.1"])
+
+    async with browser_context(uuid.uuid4()) as context:
+        for url in (
+            internal_server.url("/known"),
+            f"http://evil.test:{internal_server.port}/known",
+        ):
+            page = await context.new_page()
+            with pytest.raises(PlaywrightError):
+                await page.goto(url)
+            await page.close()
+
+        page = await context.new_page()
+        await page.goto(page_server.url("/known"))
+        outcome = await page.evaluate(REACH_INTERNAL_JS, internal_server.url("/known"))
+        await page.close()
+
+    assert outcome == {"fetched": "refused", "socket": "refused", "image": "refused"}
+    assert internal_server.requests == []
+
+
+@pytest.mark.usefixtures("public_browser_manager")
+@pytest.mark.skipif(
+    os.getenv("CI") is not None,
+    reason=(
+        "живая внешняя страница никогда не открывается в CI — раннер без sandbox, "
+        "см. architecture.md, раздел «Песочница Chromium»"
+    ),
+)
+async def test_a_real_public_page_still_opens_through_the_egress_policy() -> None:
+    result = await OpenPageTool().execute(
+        {"url": "https://example.com/"}, conversation_id=uuid.uuid4()
+    )
+
+    if result.error == PAGE_UNAVAILABLE_TEXT:
+        pytest.skip("example.com недоступен по сети")
+
+    assert result.error != BLOCKED_ADDRESS_TEXT
+    assert not result.is_error, result.error
+    assert result.data["title"] == KNOWN_TITLE
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_a_huge_page_is_clipped_inside_the_browser_before_it_crosses_ipc() -> None:
+    huge_paragraph = "слово " * 50_000
+    paragraphs = "".join(f"<p>{huge_paragraph}</p>" for _ in range(100))
+    title = "🙂" * 5_000
+
+    async with browser_context(uuid.uuid4()) as context:
+        page = await context.new_page()
+        await page.set_content(
+            f"<html><head><title>{title}</title></head><body><main>"
+            f"<p>   </p>{paragraphs}</main></body></html>"
+        )
+        with_paragraphs = await extract_page(page)
+        await page.set_content(f"<html><body><div>{huge_paragraph}</div></body></html>")
+        without_paragraphs = await page.evaluate(EXTRACT_PAGE_JS, EXTRACT_LIMITS)
+        await page.close()
+
+    assert len(with_paragraphs["paragraphs"]) == MAX_PARAGRAPHS
+    assert all(len(text) == MAX_CONTENT_CHARS + 1 for text in with_paragraphs["paragraphs"])
+    assert with_paragraphs["fallback"] == ""
+    assert len(with_paragraphs["title"]) == MAX_TITLE_CHARS + 1
+    assert without_paragraphs["paragraphs"] == []
+    assert len(without_paragraphs["fallback"]) == MAX_CONTENT_CHARS + 1
+
+    summary = build_page_summary(
+        url="about:blank",
+        title=with_paragraphs["title"],
+        paragraphs=with_paragraphs["paragraphs"],
+        fallback=with_paragraphs["fallback"],
+    )
+    assert len(summary.title) == MAX_TITLE_CHARS
+    assert summary.title.endswith("…")
+    assert len(summary.content) == MAX_CONTENT_CHARS
+    assert summary.content.endswith("…")

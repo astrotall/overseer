@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from libs.browser import browser_context
+from libs.browser import EgressDeniedError, EgressGuard, browser_context, get_egress_guard
 from libs.core.exceptions import ConfigurationError
 from libs.core.logging import get_logger
 from libs.tools.base import Tool, ToolResult
 
 if TYPE_CHECKING:
-    from playwright.async_api import Page
+    from playwright.async_api import Page, Request
 
 logger = get_logger(__name__)
 
@@ -23,16 +23,37 @@ MAX_CONTENT_CHARS: Final = 1500
 MAX_PARAGRAPHS: Final = 3
 NAVIGATION_TIMEOUT_MS: Final = 15_000
 
+EXTRACT_LIMITS: Final[dict[str, int]] = {
+    "maxParagraphs": MAX_PARAGRAPHS,
+    "maxChars": MAX_CONTENT_CHARS + 1,
+    "maxTitleChars": MAX_TITLE_CHARS + 1,
+}
+
 EXTRACT_PAGE_JS: Final = """
-() => {
+({ maxParagraphs, maxChars, maxTitleChars }) => {
+  const clip = (value, limit) => {
+    let clipped = "";
+    let count = 0;
+    for (const symbol of (value || "").replace(/\\s+/g, " ").trim()) {
+      if (count === limit) break;
+      clipped += symbol;
+      count += 1;
+    }
+    return clipped;
+  };
   const container = document.querySelector("main, article") || document.body;
-  const paragraphs = container
-    ? Array.from(container.querySelectorAll("p")).map(p => p.innerText)
-    : [];
+  const paragraphs = [];
+  if (container) {
+    for (const paragraph of container.querySelectorAll("p")) {
+      if (paragraphs.length === maxParagraphs) break;
+      const text = clip(paragraph.innerText, maxChars);
+      if (text) paragraphs.push(text);
+    }
+  }
   return {
-    title: document.title || "",
+    title: clip(document.title, maxTitleChars),
     paragraphs,
-    fallback: container ? container.innerText : "",
+    fallback: container && paragraphs.length === 0 ? clip(container.innerText, maxChars) : "",
   };
 }
 """
@@ -43,6 +64,11 @@ PAGE_UNAVAILABLE_TEXT: Final = (
 )
 NOT_HTML_TEXT: Final = (
     "Страница вернула не HTML-содержимое, извлечь текст нельзя. Открыть не удалось."
+)
+BLOCKED_ADDRESS_TEXT: Final = (
+    "Адрес ведёт не в публичный интернет, а во внутреннюю сеть (loopback, частный, "
+    "link-local или зарезервированный диапазон) — сам или через перенаправление. Открывать "
+    "такие адреса запрещено. Не повторяй вызов с этим адресом или с другим именем того же ресурса."
 )
 
 
@@ -77,7 +103,8 @@ class OpenPageTool(Tool[OpenPageArguments]):
     description = (
         "Открывает страницу по указанному адресу и возвращает её заголовок и краткое "
         "текстовое содержимое (первые абзацы). Не показывает страницу визуально — "
-        "браузер работает без экрана, а извлечённый текст пересказывает модель."
+        "браузер работает без экрана, а извлечённый текст пересказывает модель. "
+        "Открывает только адреса публичного интернета."
     )
     arguments_model = OpenPageArguments
 
@@ -85,25 +112,41 @@ class OpenPageTool(Tool[OpenPageArguments]):
         self, arguments: OpenPageArguments, *, conversation_id: uuid.UUID
     ) -> ToolResult:
         try:
+            guard = get_egress_guard()
+            refusal = await _refuse_non_public(guard, arguments.url)
+            if refusal is not None:
+                return refusal
+
             async with browser_context(conversation_id) as context:
                 page = await context.new_page()
                 try:
-                    return await self._open(page, arguments.url)
+                    return await self._open(page, guard, arguments.url)
                 finally:
                     await page.close()
         except ConfigurationError as exc:
             logger.warning("open_page.browser_unavailable", error=str(exc))
             return ToolResult.failed(f"Открыть страницу не удалось: {exc}")
 
-    async def _open(self, page: Page, url: str) -> ToolResult:
+    async def _open(self, page: Page, guard: EgressGuard, url: str) -> ToolResult:
         from playwright.async_api import Error as PlaywrightError
 
+        failed_navigations: list[str] = []
+
+        def remember_failed_navigation(request: Request) -> None:
+            if request.is_navigation_request() and request.frame == page.main_frame:
+                failed_navigations.append(request.url)
+
+        page.on("requestfailed", remember_failed_navigation)
         try:
             response = await page.goto(
                 url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS
             )
         except PlaywrightError as exc:
             logger.warning("open_page.navigation_failed", error=type(exc).__name__)
+            if failed_navigations:
+                refusal = await _refuse_non_public(guard, failed_navigations[-1])
+                if refusal is not None:
+                    return refusal
             return ToolResult.failed(PAGE_UNAVAILABLE_TEXT)
 
         status = response.status if response is not None else None
@@ -118,7 +161,7 @@ class OpenPageTool(Tool[OpenPageArguments]):
             logger.warning("open_page.not_html", content_type=content_type)
             return ToolResult.failed(NOT_HTML_TEXT)
 
-        raw = await page.evaluate(EXTRACT_PAGE_JS)
+        raw = await extract_page(page)
         summary = build_page_summary(
             url=page.url,
             title=raw.get("title", ""),
@@ -135,6 +178,23 @@ class OpenPageTool(Tool[OpenPageArguments]):
             summary=summary.title or "Страница открыта, заголовка нет",
             data=summary.model_dump(),
         )
+
+
+async def extract_page(page: Page) -> dict[str, Any]:
+    raw: dict[str, Any] = await page.evaluate(EXTRACT_PAGE_JS, EXTRACT_LIMITS)
+    return raw
+
+
+async def _refuse_non_public(guard: EgressGuard, url: str) -> ToolResult | None:
+    try:
+        await guard.check_url(url)
+    except EgressDeniedError as exc:
+        logger.warning("open_page.address_blocked", address=str(exc.address), port=exc.port)
+        return ToolResult.failed(BLOCKED_ADDRESS_TEXT)
+    except (OSError, ValueError):
+        logger.warning("open_page.address_unresolvable")
+        return ToolResult.failed(PAGE_UNAVAILABLE_TEXT)
+    return None
 
 
 def build_page_summary(

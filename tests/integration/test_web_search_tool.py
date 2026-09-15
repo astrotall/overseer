@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import threading
 import uuid
@@ -12,7 +13,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 
-from libs.browser import browser_context, init_browser_manager, reset_browser_manager
+from libs.browser import EgressGuard, browser_context, init_browser_manager, reset_browser_manager
 from libs.browser.session import BrowserSessionManager
 from libs.core.config import Settings
 from libs.tools import WebSearchTool
@@ -98,6 +99,10 @@ class FakeDuckDuckGo:
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
     @property
+    def port(self) -> int:
+        return int(self._server.server_address[1])
+
+    @property
     def url(self) -> str:
         host, port = self._server.server_address[:2]
         return f"http://{host!s}:{port}/html/"
@@ -151,11 +156,19 @@ def fake_duckduckgo() -> Iterator[FakeDuckDuckGo]:
 
 
 @pytest.fixture
+def closed_port() -> int:
+    with ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler) as server:
+        return int(server.server_address[1])
+
+
+@pytest.fixture
 async def browser_manager(
-    settings: Settings,
+    settings: Settings, fake_duckduckgo: FakeDuckDuckGo, closed_port: int
 ) -> AsyncIterator[BrowserSessionManager[BrowserContext]]:
     reset_browser_manager()
-    manager = init_browser_manager(settings)
+    loopback = ipaddress.IPv4Address("127.0.0.1")
+    guard = EgressGuard(exempt={(loopback, fake_duckduckgo.port), (loopback, closed_port)})
+    manager = init_browser_manager(settings, egress_guard=guard)
     try:
         async with manager.acquire(uuid.uuid4()):
             pass
@@ -287,10 +300,8 @@ async def test_a_search_that_found_nothing_is_a_success_with_no_results(
 
 
 @pytest.mark.usefixtures("browser_manager")
-async def test_an_unreachable_search_engine_is_an_error_not_a_crash() -> None:
-    with ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler) as server:
-        host, port = server.server_address[:2]
-    closed_port_url = f"http://{host!s}:{port}/html/"
+async def test_an_unreachable_search_engine_is_an_error_not_a_crash(closed_port: int) -> None:
+    closed_port_url = f"http://127.0.0.1:{closed_port}/html/"
 
     result = await WebSearchTool(search_url=closed_port_url).execute(
         {"query": _query()}, conversation_id=uuid.uuid4()
