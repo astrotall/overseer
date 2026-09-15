@@ -121,7 +121,25 @@
   `conversation_id` сквозь протокол держит `test_tool_protocol.py`, сквозь диспетчер —
   `test_the_dispatcher_hands_every_tool_the_conversation_it_runs_in` в
   `test_chat_service.py`, регистрацию в `lifespan` — `test_api_startup.py`. Разбор выбора
-  поисковика — в [architecture.md](architecture.md), раздел «Инструмент `web_search`»;
+  поисковика — в [architecture.md](architecture.md), раздел «Инструмент `web_search`». С OVE-38
+  весь трафик браузера идёт через прокси против SSRF, который запрещает loopback, поэтому
+  менеджер здесь создаётся с `EgressGuard(exempt={(127.0.0.1, порт фейка), (127.0.0.1,
+  закрытый порт)})` — точечно, по паре адрес+порт;
+- `tests/integration/test_open_page_tool.py` — инструмент `open_page` (OVE-38) на **живом
+  Chromium**, `@pytest.mark.browser`, с той же политикой пропуска. Кроме формы результата, HTTP- и
+  не-HTML-ошибок — **сценарии обхода защиты от SSRF**, и в каждом проверяется не только
+  `BLOCKED_ADDRESS_TEXT`, но и то, что внутренний сервер **не получил ни одного запроса**:
+  loopback по IP, `[::1]` (сервер на IPv6, без IPv6-loopback — пропуск), частные, link-local и
+  IPv4-mapped IPv6-литералы, имя, резолвящееся во внутреннюю сеть (резолвер `EgressGuard`
+  подменён, и Chromium доходит до него через прокси), редирект с разрешённого сервера на
+  внутренний по IP, по имени и на `[::1]`, DNS rebinding между проверкой и подключением, и
+  `fetch` / `WebSocket` / `<img>` из JS открытой страницы. Разрешённый путь — прежние тесты
+  через exempt-сервер и живой `https://example.com` с настоящим резолвером (под `CI` не
+  запускается, как живой DDG). Там же `test_a_huge_page_is_clipped_inside_the_browser_before_it_crosses_ipc`
+  проверяет **сырой** результат `page.evaluate()`: пределы абзацев и символов соблюдены до
+  границы IPC. Протокол SOCKS5-прокси, политика адресов IPv4/IPv6 и запуск Chromium только через
+  прокси — `tests/unit/test_browser_egress.py`, без браузера. Разбор — в
+  [architecture.md](architecture.md), раздел «Исходящий трафик браузера: защита от SSRF»;
 - `tests/unit/` — юнит-тесты бизнес-логики: конфиг, LLM-клиенты и фабрика, контракт
   `libs/llm/base.py`, протокол инструмента `libs/tools/base.py` (`test_tool_protocol.py`:
   прямой вызов `EchoTool`, построение `ToolSpec`, ошибки аргументов и исключение внутри

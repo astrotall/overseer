@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Final
 
+from libs.browser.egress import EgressGuard, EgressProxy
 from libs.browser.session import BrowserSessionManager
 from libs.core.config import Settings
 from libs.core.exceptions import ConfigurationError
@@ -16,10 +18,19 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 CONTAINER_LAUNCH_ARGS: Final[tuple[str, ...]] = ("--disable-dev-shm-usage",)
+EGRESS_LAUNCH_ARGS: Final[tuple[str, ...]] = (
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+)
+PROXIED_LOOPBACK_OVERRIDE_ENV: Final = "PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK"
 
 PLAYWRIGHT_MISSING = (
     "Playwright не установлен: браузерные инструменты недоступны. "
     "Поставьте группу browser — uv sync --group browser && uv run playwright install chromium"
+)
+PROXIED_LOOPBACK_DISABLED = (
+    f"Задана переменная окружения {PROXIED_LOOPBACK_OVERRIDE_ENV}: с ней Chromium ходит на "
+    "loopback-адреса мимо прокси исходящего трафика, и защита от SSRF не работает. "
+    "Браузер не запускается, пока переменная не снята."
 )
 
 
@@ -30,10 +41,12 @@ class PlaywrightBrowserBackend:
         headless: bool = True,
         no_sandbox: bool = False,
         launch_args: Sequence[str] = CONTAINER_LAUNCH_ARGS,
+        egress_guard: EgressGuard | None = None,
     ) -> None:
         self._headless = headless
         self._sandbox = not no_sandbox
         self._launch_args = list(launch_args)
+        self._egress_proxy = EgressProxy(egress_guard or EgressGuard())
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
 
@@ -64,6 +77,10 @@ class PlaywrightBrowserBackend:
                 await playwright.stop()
             except Exception:
                 logger.exception("browser.driver_stop_failed")
+        try:
+            await self._egress_proxy.aclose()
+        except Exception:
+            logger.exception("browser.egress_proxy_stop_failed")
 
     async def _ensure_browser(self) -> Browser:
         browser = self._browser
@@ -73,13 +90,18 @@ class PlaywrightBrowserBackend:
             logger.warning("browser.reconnecting_after_crash")
             await self.aclose()
 
+        if os.environ.get(PROXIED_LOOPBACK_OVERRIDE_ENV):
+            raise ConfigurationError(PROXIED_LOOPBACK_DISABLED)
+
         if self._playwright is None:
             self._playwright = await self._start_playwright()
 
+        await self._egress_proxy.start()
         self._browser = await self._playwright.chromium.launch(
             headless=self._headless,
-            args=self._launch_args,
+            args=[*self._launch_args, *EGRESS_LAUNCH_ARGS],
             chromium_sandbox=self._sandbox,
+            proxy={"server": self._egress_proxy.server_url},
         )
         logger.info(
             "browser.launched",
@@ -98,10 +120,13 @@ class PlaywrightBrowserBackend:
         return await async_playwright().start()
 
 
-def create_browser_manager(settings: Settings) -> BrowserSessionManager[BrowserContext]:
+def create_browser_manager(
+    settings: Settings, *, egress_guard: EgressGuard | None = None
+) -> BrowserSessionManager[BrowserContext]:
     backend = PlaywrightBrowserBackend(
         headless=settings.browser_headless,
         no_sandbox=settings.browser_no_sandbox,
+        egress_guard=egress_guard,
     )
     return BrowserSessionManager(
         backend,
@@ -112,15 +137,19 @@ def create_browser_manager(settings: Settings) -> BrowserSessionManager[BrowserC
 
 
 _manager: BrowserSessionManager[BrowserContext] | None = None
+_egress_guard: EgressGuard | None = None
 
 
-def init_browser_manager(settings: Settings) -> BrowserSessionManager[BrowserContext]:
-    global _manager
+def init_browser_manager(
+    settings: Settings, *, egress_guard: EgressGuard | None = None
+) -> BrowserSessionManager[BrowserContext]:
+    global _manager, _egress_guard
 
     if _manager is not None:
         return _manager
 
-    _manager = create_browser_manager(settings)
+    _egress_guard = egress_guard or EgressGuard()
+    _manager = create_browser_manager(settings, egress_guard=_egress_guard)
     return _manager
 
 
@@ -132,9 +161,19 @@ def get_browser_manager() -> BrowserSessionManager[BrowserContext]:
     return _manager
 
 
+def get_egress_guard() -> EgressGuard:
+    if _egress_guard is None:
+        raise ConfigurationError(
+            "Политика исходящего трафика браузера не инициализирована: "
+            "вызовите init_browser_manager()"
+        )
+    return _egress_guard
+
+
 def reset_browser_manager() -> None:
-    global _manager
+    global _manager, _egress_guard
     _manager = None
+    _egress_guard = None
 
 
 def browser_context(conversation_id: uuid.UUID) -> AbstractAsyncContextManager[BrowserContext]:
