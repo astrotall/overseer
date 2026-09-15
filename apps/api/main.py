@@ -15,7 +15,13 @@ from libs.db.redis import close_redis, init_redis
 from libs.db.session import close_engine, init_engine
 from libs.llm.base import LLMClient
 from libs.llm.factory import get_llm_client, reset_llm_client_cache
-from libs.tools import EchoTool, WebSearchTool, init_tool_registry, reset_tool_registry
+from libs.tools import (
+    EchoTool,
+    OpenPageTool,
+    WebSearchTool,
+    init_tool_registry,
+    reset_tool_registry,
+)
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext
@@ -39,6 +45,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         tool_registry = init_tool_registry()
         tool_registry.register(EchoTool())
         tool_registry.register(WebSearchTool())
+        tool_registry.register(OpenPageTool())
         browser_manager = init_browser_manager(settings)
         browser_manager.start_sweeper()
         logger.info("api.startup", env=settings.env, llm_provider=settings.llm_provider)
