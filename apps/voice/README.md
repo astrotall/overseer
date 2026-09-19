@@ -49,7 +49,7 @@
 
 Через границу поток → цикл едут готовые объекты, а не кадры (`loop.call_soon_threadsafe`):
 `WakeWordEvent` и `Utterance`. Обоснование — в
-[.claude/knowledge/architecture.md](../../.claude/knowledge/architecture.md), раздел
+[.claude/knowledge/architecture-voice.md](../../.claude/knowledge/architecture-voice.md), раздел
 «`apps/voice` — голосовой клиент (OVE-44)».
 
 ## Раскладка модулей
@@ -94,7 +94,7 @@
 инференс через `onnxruntime`, вход — 16 kHz моно int16 кадрами по 80 мс. Обоснование
 выбора и **лицензионная оговорка** (готовые модели фраз идут под некоммерческой
 CC BY-NC-SA 4.0 и до поставки наружу обязаны смениться на свою) —
-в [.claude/knowledge/architecture.md](../../.claude/knowledge/architecture.md), раздел
+в [.claude/knowledge/architecture-voice.md](../../.claude/knowledge/architecture-voice.md), раздел
 «Движок wake word — openWakeWord (OVE-45)».
 
 Фраза берётся из `VoiceSettings.wake_word_phrase` (`VOICE_WAKE_WORD_PHRASE`), дефолт —
@@ -127,7 +127,7 @@ CC BY-NC-SA 4.0 и до поставки наружу обязаны смени�
 VAD намеренно простой: искать речь в записи не его работа — это уже делает `vad_filter`
 внутри faster-whisper, — ему нужно только поймать конец реплики. Обоснование выбора (и
 почему нет адаптивной оценки шума) — в
-[.claude/knowledge/architecture.md](../../.claude/knowledge/architecture.md), раздел
+[.claude/knowledge/architecture-voice.md](../../.claude/knowledge/architecture-voice.md), раздел
 «Захват реплики, эндпоинтинг и STT (OVE-46)».
 
 Пустой текст, одни знаки препинания или неуверенность самой модели — реплика **не
@@ -215,7 +215,7 @@ wake word выключен (`state.py`) — это и есть защита от
 на `torch`, CPU). Локальный, как и STT: ключей провайдеров у голосового клиента нет, и
 отправлять наружу текст ответа ради синтеза — отдельное решение, а не умолчание.
 Обоснование выбора и модель потоков — в
-[.claude/knowledge/architecture.md](../../.claude/knowledge/architecture.md), раздел
+[.claude/knowledge/architecture-voice.md](../../.claude/knowledge/architecture-voice.md), раздел
 «Синтез речи и воспроизведение (OVE-47)».
 
 Стриминга нет: `reply` от `/ws/chat` и так приходит целиком (OVE-18), синтезировать по

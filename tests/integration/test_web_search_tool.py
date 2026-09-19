@@ -353,7 +353,7 @@ async def test_a_search_engine_that_never_answers_times_out_with_a_clear_error(
     reason=(
         "живой запрос к внешнему DuckDuckGo никогда не запускается в CI, независимо от того, "
         "заблокирует ли DDG конкретный раннер, — раннер без sandbox не должен зависеть от "
-        "стороннего антибот-поведения, см. architecture.md, раздел «Песочница Chromium»"
+        "стороннего антибот-поведения, см. architecture-browser.md, раздел «Песочница Chromium»"
     ),
 )
 async def test_a_real_search_returns_results_in_the_promised_shape() -> None:

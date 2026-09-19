@@ -50,7 +50,7 @@ jobs:
       # html.duckduckgo.com помечен skipif(CI) и в CI не запускается вовсе — раннер
       # без sandbox не должен зависеть от антибот-поведения стороннего сайта; сама
       # песочница проверяется в образе apps/api, где она и нужна, —
-      # см. .claude/knowledge/architecture.md.
+      # см. .claude/knowledge/architecture-browser.md.
       BROWSER_NO_SANDBOX: "true"
 
     steps:
