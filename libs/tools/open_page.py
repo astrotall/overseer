@@ -7,13 +7,13 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from libs.browser import EgressDeniedError, EgressGuard, browser_context, get_egress_guard
+from libs.browser import EgressDeniedError, EgressGuard, browser_page, get_egress_guard
 from libs.core.exceptions import ConfigurationError
 from libs.core.logging import get_logger
 from libs.tools.base import Tool, ToolResult
 
 if TYPE_CHECKING:
-    from playwright.async_api import Page, Request
+    from playwright.async_api import Page, Request, Response
 
 logger = get_logger(__name__)
 
@@ -21,6 +21,7 @@ MAX_URL_LENGTH: Final = 2048
 MAX_TITLE_CHARS: Final = 200
 MAX_CONTENT_CHARS: Final = 1500
 MAX_PARAGRAPHS: Final = 3
+MAX_URL_IN_ERROR_CHARS: Final = 200
 NAVIGATION_TIMEOUT_MS: Final = 15_000
 
 EXTRACT_LIMITS: Final[dict[str, int]] = {
@@ -59,8 +60,13 @@ EXTRACT_PAGE_JS: Final = """
 """
 
 PAGE_UNAVAILABLE_TEXT: Final = (
-    "Страница не ответила: адрес не существует, нет сети или истекло время ожидания. "
+    "Страница не ответила: адрес не существует, нет сети или соединение отклонено. "
     "Открыть не удалось."
+)
+PAGE_TIMEOUT_SUMMARY: Final = "Страница не загрузилась вовремя"
+PAGE_CHANGED_TEXT: Final = (
+    "Страница сама перешла на другой адрес, пока её читали, и содержимое извлечь не удалось. "
+    "Повтори вызов один раз; если снова не выйдет — скажи пользователю."
 )
 NOT_HTML_TEXT: Final = (
     "Страница вернула не HTML-содержимое, извлечь текст нельзя. Открыть не удалось."
@@ -117,36 +123,45 @@ class OpenPageTool(Tool[OpenPageArguments]):
             if refusal is not None:
                 return refusal
 
-            async with browser_context(conversation_id) as context:
-                page = await context.new_page()
-                try:
-                    return await self._open(page, guard, arguments.url)
-                finally:
-                    await page.close()
+            async with browser_page(conversation_id) as page:
+                return await self._open(page, guard, arguments.url)
         except ConfigurationError as exc:
             logger.warning("open_page.browser_unavailable", error=str(exc))
             return ToolResult.failed(f"Открыть страницу не удалось: {exc}")
 
     async def _open(self, page: Page, guard: EgressGuard, url: str) -> ToolResult:
         from playwright.async_api import Error as PlaywrightError
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
         failed_navigations: list[str] = []
+        navigation_responses: list[Response] = []
 
         def remember_failed_navigation(request: Request) -> None:
             if request.is_navigation_request() and request.frame == page.main_frame:
                 failed_navigations.append(request.url)
 
+        def remember_navigation_response(response: Response) -> None:
+            if response.request.is_navigation_request() and response.frame == page.main_frame:
+                navigation_responses.append(response)
+
         page.on("requestfailed", remember_failed_navigation)
+        page.on("response", remember_navigation_response)
         try:
             response = await page.goto(
                 url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS
             )
+        except PlaywrightTimeoutError:
+            logger.warning("open_page.navigation_timed_out", timeout_ms=NAVIGATION_TIMEOUT_MS)
+            return ToolResult.failed(page_timeout_text(url), summary=PAGE_TIMEOUT_SUMMARY)
         except PlaywrightError as exc:
             logger.warning("open_page.navigation_failed", error=type(exc).__name__)
             if failed_navigations:
                 refusal = await _refuse_non_public(guard, failed_navigations[-1])
                 if refusal is not None:
                     return refusal
+            if navigation_responses and _is_file_download(navigation_responses[-1]):
+                logger.warning("open_page.file_download_refused")
+                return ToolResult.failed(NOT_HTML_TEXT)
             return ToolResult.failed(PAGE_UNAVAILABLE_TEXT)
 
         status = response.status if response is not None else None
@@ -161,7 +176,11 @@ class OpenPageTool(Tool[OpenPageArguments]):
             logger.warning("open_page.not_html", content_type=content_type)
             return ToolResult.failed(NOT_HTML_TEXT)
 
-        raw = await extract_page(page)
+        try:
+            raw = await extract_page(page)
+        except PlaywrightError as exc:
+            logger.warning("open_page.extraction_failed", error=type(exc).__name__)
+            return ToolResult.failed(PAGE_CHANGED_TEXT)
         summary = build_page_summary(
             url=page.url,
             title=raw.get("title", ""),
@@ -197,6 +216,14 @@ async def _refuse_non_public(guard: EgressGuard, url: str) -> ToolResult | None:
     return None
 
 
+def page_timeout_text(url: str) -> str:
+    shown = _truncate(url, MAX_URL_IN_ERROR_CHARS)
+    return (
+        f"Страница {shown} не загрузилась за {NAVIGATION_TIMEOUT_MS / 1000:g} с: "
+        "сервер не ответил вовремя. Открыть не удалось."
+    )
+
+
 def build_page_summary(
     *, url: str, title: str, paragraphs: Sequence[str], fallback: str
 ) -> PageSummary:
@@ -208,6 +235,15 @@ def build_page_summary(
         title=_truncate(_clean(title), MAX_TITLE_CHARS),
         url=url,
         content=_truncate(content, MAX_CONTENT_CHARS),
+    )
+
+
+def _is_file_download(response: Response) -> bool:
+    if not 200 <= response.status < 300:
+        return False
+    disposition = response.headers.get("content-disposition", "").strip().lower()
+    return disposition.startswith("attachment") or not _is_html(
+        response.headers.get("content-type", "")
     )
 
 

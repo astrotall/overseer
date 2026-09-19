@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import os
 import socket
@@ -24,6 +25,7 @@ from libs.browser.egress import IPAddress
 from libs.browser.session import BrowserSessionManager
 from libs.core.config import Settings
 from libs.tools import OpenPageTool
+from libs.tools import open_page as open_page_module
 from libs.tools.open_page import (
     BLOCKED_ADDRESS_TEXT,
     EXTRACT_LIMITS,
@@ -32,6 +34,8 @@ from libs.tools.open_page import (
     MAX_PARAGRAPHS,
     MAX_TITLE_CHARS,
     NOT_HTML_TEXT,
+    PAGE_CHANGED_TEXT,
+    PAGE_TIMEOUT_SUMMARY,
     PAGE_UNAVAILABLE_TEXT,
     build_page_summary,
     extract_page,
@@ -43,6 +47,9 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.browser
 
 LOOPBACK = ipaddress.IPv4Address("127.0.0.1")
+
+SHORT_NAVIGATION_TIMEOUT_MS = 500
+TIMEOUT_CALL_DEADLINE_S = 20.0
 
 KNOWN_TITLE = "Example Domain"
 KNOWN_PARAGRAPH_1 = "This is a page used for illustrative examples in documents."
@@ -91,7 +98,16 @@ PAGES: dict[str, tuple[int, str, str]] = {
     "/not-found": (404, "text/html; charset=utf-8", "<html><body>Not found</body></html>"),
     "/broken": (500, "text/html; charset=utf-8", "<html><body>Broken</body></html>"),
     "/data.json": (200, "application/json", '{"not": "html"}'),
+    "/report.pdf": (200, "application/pdf", "%PDF-1.4 not a page"),
+    "/attachment": (200, "text/html; charset=utf-8", "<html><body>saved, not shown</body></html>"),
 }
+
+EXTRA_HEADERS: dict[str, tuple[tuple[str, str], ...]] = {
+    "/attachment": (("Content-Disposition", 'attachment; filename="page.html"'),),
+}
+
+STALLED_PATHS = frozenset({"/hang", "/stall"})
+STALL_LIMIT_S = 30.0
 
 
 class _IPv6HTTPServer(ThreadingHTTPServer):
@@ -101,6 +117,7 @@ class _IPv6HTTPServer(ThreadingHTTPServer):
 class FakePageServer:
     def __init__(self, host: str = "127.0.0.1") -> None:
         self.requests: list[SeenRequest] = []
+        self.release = threading.Event()
         self._host = host
         self._lock = threading.Lock()
         server_class = _IPv6HTTPServer if ":" in host else ThreadingHTTPServer
@@ -126,6 +143,7 @@ class FakePageServer:
         self._thread.start()
 
     def stop(self) -> None:
+        self.release.set()
         self._server.shutdown()
         self._server.server_close()
 
@@ -153,6 +171,17 @@ class FakePageServer:
                     self.end_headers()
                     return
 
+                if parts.path in STALLED_PATHS:
+                    if parts.path == "/stall":
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header("Content-Length", "1000")
+                        self.end_headers()
+                        self.wfile.write(b"<html><body>")
+                        self.wfile.flush()
+                    fake.release.wait(STALL_LIMIT_S)
+                    return
+
                 status, content_type, body = PAGES.get(
                     parts.path, (404, "text/html; charset=utf-8", "<html></html>")
                 )
@@ -160,6 +189,8 @@ class FakePageServer:
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(payload)))
+                for name, value in EXTRA_HEADERS.get(parts.path, ()):
+                    self.send_header(name, value)
                 if issued:
                     self.send_header("Set-Cookie", f"visitor={issued}; Path=/")
                 self.end_headers()
@@ -361,6 +392,76 @@ async def test_non_html_content_is_a_clear_failure_not_a_crash(page_server: Fake
 
     assert result.is_error
     assert result.error == NOT_HTML_TEXT
+
+
+@pytest.mark.usefixtures("browser_manager")
+@pytest.mark.parametrize("path", ["/report.pdf", "/attachment"])
+async def test_a_file_the_browser_would_download_is_reported_as_not_html(
+    page_server: FakePageServer, path: str
+) -> None:
+    result = await OpenPageTool().execute(
+        {"url": page_server.url(path)}, conversation_id=uuid.uuid4()
+    )
+
+    assert result.is_error
+    assert result.error == NOT_HTML_TEXT
+
+
+@pytest.mark.usefixtures("browser_manager")
+@pytest.mark.parametrize("path", ["/hang", "/stall"])
+async def test_a_page_that_never_finishes_loading_times_out_with_a_clear_error_naming_the_url(
+    monkeypatch: pytest.MonkeyPatch, page_server: FakePageServer, path: str
+) -> None:
+    monkeypatch.setattr(open_page_module, "NAVIGATION_TIMEOUT_MS", SHORT_NAVIGATION_TIMEOUT_MS)
+    url = page_server.url(path)
+    conversation_id = uuid.uuid4()
+
+    async with asyncio.timeout(TIMEOUT_CALL_DEADLINE_S):
+        result = await OpenPageTool().execute({"url": url}, conversation_id=conversation_id)
+
+    assert result.is_error
+    assert result.error is not None
+    assert url in result.error
+    assert "0.5 с" in result.error
+    assert result.error != PAGE_UNAVAILABLE_TEXT
+    assert result.summary == PAGE_TIMEOUT_SUMMARY
+    assert url not in result.summary
+    async with browser_context(conversation_id) as context:
+        assert context.pages == []
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_the_url_in_a_timeout_error_is_shortened(
+    monkeypatch: pytest.MonkeyPatch, page_server: FakePageServer
+) -> None:
+    monkeypatch.setattr(open_page_module, "NAVIGATION_TIMEOUT_MS", SHORT_NAVIGATION_TIMEOUT_MS)
+    url = page_server.url("/hang") + "?" + "x" * 1500
+
+    async with asyncio.timeout(TIMEOUT_CALL_DEADLINE_S):
+        result = await OpenPageTool().execute({"url": url}, conversation_id=uuid.uuid4())
+
+    assert result.error is not None
+    assert len(result.error) < 500
+    assert page_server.url("/hang") in result.error
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_a_page_that_navigates_away_while_it_is_read_is_a_clear_failure(
+    monkeypatch: pytest.MonkeyPatch, page_server: FakePageServer
+) -> None:
+    from playwright.async_api import Error as PlaywrightError
+
+    async def destroyed(page: object) -> dict[str, object]:
+        raise PlaywrightError("Page.evaluate: Execution context was destroyed")
+
+    monkeypatch.setattr(open_page_module, "extract_page", destroyed)
+
+    result = await OpenPageTool().execute(
+        {"url": page_server.url("/known")}, conversation_id=uuid.uuid4()
+    )
+
+    assert result.is_error
+    assert result.error == PAGE_CHANGED_TEXT
 
 
 @pytest.mark.usefixtures("browser_manager")

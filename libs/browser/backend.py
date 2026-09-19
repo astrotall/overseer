@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
-from collections.abc import Sequence
-from contextlib import AbstractAsyncContextManager
+from collections.abc import AsyncIterator, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import TYPE_CHECKING, Final
 
 from libs.browser.egress import EgressGuard, EgressProxy
@@ -13,9 +14,11 @@ from libs.core.exceptions import ConfigurationError
 from libs.core.logging import get_logger
 
 if TYPE_CHECKING:
-    from playwright.async_api import Browser, BrowserContext, Playwright
+    from playwright.async_api import Browser, BrowserContext, Page, Playwright
 
 logger = get_logger(__name__)
+
+PAGE_CLOSE_TIMEOUT_S: Final = 5.0
 
 CONTAINER_LAUNCH_ARGS: Final[tuple[str, ...]] = ("--disable-dev-shm-usage",)
 EGRESS_LAUNCH_ARGS: Final[tuple[str, ...]] = (
@@ -61,7 +64,7 @@ class PlaywrightBrowserBackend:
 
     async def new_context(self) -> BrowserContext:
         browser = await self._ensure_browser()
-        return await browser.new_context()
+        return await browser.new_context(accept_downloads=False)
 
     async def aclose(self) -> None:
         browser, self._browser = self._browser, None
@@ -178,3 +181,31 @@ def reset_browser_manager() -> None:
 
 def browser_context(conversation_id: uuid.UUID) -> AbstractAsyncContextManager[BrowserContext]:
     return get_browser_manager().acquire(conversation_id)
+
+
+@asynccontextmanager
+async def browser_page(conversation_id: uuid.UUID) -> AsyncIterator[Page]:
+    async with browser_context(conversation_id) as context:
+        page = await context.new_page()
+        try:
+            yield page
+        finally:
+            await _close_page(conversation_id, page)
+
+
+async def _close_page(conversation_id: uuid.UUID, page: Page) -> None:
+    try:
+        await asyncio.wait_for(page.close(), PAGE_CLOSE_TIMEOUT_S)
+    except TimeoutError:
+        logger.warning(
+            "browser.page_close_timed_out",
+            conversation_id=str(conversation_id),
+            timeout_s=PAGE_CLOSE_TIMEOUT_S,
+        )
+        await get_browser_manager().close_session(conversation_id)
+    except Exception as exc:
+        logger.warning(
+            "browser.page_close_failed",
+            conversation_id=str(conversation_id),
+            error=type(exc).__name__,
+        )

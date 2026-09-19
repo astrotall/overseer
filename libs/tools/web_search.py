@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from libs.browser import browser_context
+from libs.browser import browser_page
 from libs.core.exceptions import ConfigurationError
 from libs.core.logging import get_logger
 from libs.tools.base import Tool, ToolResult
@@ -48,8 +48,9 @@ SEARCH_BLOCKED_TEXT: Final = (
     "Не повторяй запрос сразу — скажи пользователю, что поиск в интернете временно не работает."
 )
 SEARCH_UNAVAILABLE_TEXT: Final = (
-    "Поисковик не ответил: нет сети или истекло время ожидания. Поиск не выполнен."
+    "Поисковик не ответил: нет сети или соединение отклонено. Поиск не выполнен."
 )
+SEARCH_TIMEOUT_SUMMARY: Final = "Поисковик не ответил вовремя"
 UNRECOGNIZED_PAGE_TEXT: Final = (
     "Страница поисковика пришла в неизвестном виде, результаты разобрать не удалось. "
     "Поиск не выполнен."
@@ -91,22 +92,24 @@ class WebSearchTool(Tool[WebSearchArguments]):
     ) -> ToolResult:
         url = f"{self._search_url}?{urlencode({'q': arguments.query})}"
         try:
-            async with browser_context(conversation_id) as context:
-                page = await context.new_page()
-                try:
-                    return await self._search(page, url)
-                finally:
-                    await page.close()
+            async with browser_page(conversation_id) as page:
+                return await self._search(page, url)
         except ConfigurationError as exc:
             logger.warning("web_search.browser_unavailable", error=str(exc))
             return ToolResult.failed(f"Поиск недоступен: {exc}")
 
     async def _search(self, page: Page, url: str) -> ToolResult:
         from playwright.async_api import Error as PlaywrightError
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
         try:
             response = await page.goto(
                 url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS
+            )
+        except PlaywrightTimeoutError:
+            logger.warning("web_search.navigation_timed_out", timeout_ms=NAVIGATION_TIMEOUT_MS)
+            return ToolResult.failed(
+                search_timeout_text(self._search_url), summary=SEARCH_TIMEOUT_SUMMARY
             )
         except PlaywrightError as exc:
             logger.warning("web_search.navigation_failed", error=type(exc).__name__)
@@ -131,6 +134,13 @@ class WebSearchTool(Tool[WebSearchArguments]):
         return ToolResult.ok(
             summary=summary, data={"results": [result.model_dump() for result in results]}
         )
+
+
+def search_timeout_text(search_url: str) -> str:
+    return (
+        f"Поисковик {search_url} не ответил за {NAVIGATION_TIMEOUT_MS / 1000:g} с. "
+        "Поиск не выполнен: скажи пользователю, что поиск сейчас не отвечает."
+    )
 
 
 def parse_results(

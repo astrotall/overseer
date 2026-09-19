@@ -356,6 +356,7 @@ class FakeBrowser:
 
     def __init__(self) -> None:
         self.closed = False
+        self.context_options: list[dict[str, Any]] = []
 
     def is_connected(self) -> bool:
         return not self.closed
@@ -363,17 +364,21 @@ class FakeBrowser:
     async def close(self) -> None:
         self.closed = True
 
-    async def new_context(self) -> object:
+    async def new_context(self, **kwargs: Any) -> object:
+        self.context_options.append(kwargs)
         return object()
 
 
 class FakeChromium:
     def __init__(self) -> None:
         self.launches: list[dict[str, Any]] = []
+        self.browsers: list[FakeBrowser] = []
 
     async def launch(self, **kwargs: Any) -> FakeBrowser:
         self.launches.append(kwargs)
-        return FakeBrowser()
+        browser = FakeBrowser()
+        self.browsers.append(browser)
+        return browser
 
 
 class FakePlaywright:
@@ -417,6 +422,20 @@ async def test_every_browser_launch_is_routed_through_the_egress_proxy(
     await backend.aclose()
     with pytest.raises(ConnectionRefusedError):
         await asyncio.open_connection(host, int(port))
+
+
+async def test_browser_contexts_never_accept_file_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(PROXIED_LOOPBACK_OVERRIDE_ENV, raising=False)
+    backend = PlaywrightBrowserBackend(launch_args=())
+    playwright = _fake_playwright(monkeypatch, backend)
+
+    await backend.new_context()
+
+    (browser,) = playwright.chromium.browsers
+    assert browser.context_options == [{"accept_downloads": False}]
+    await backend.aclose()
 
 
 async def test_the_browser_does_not_start_if_loopback_would_bypass_the_proxy(

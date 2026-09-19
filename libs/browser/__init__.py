@@ -1,6 +1,7 @@
 from libs.browser.backend import (
     PlaywrightBrowserBackend,
     browser_context,
+    browser_page,
     create_browser_manager,
     get_browser_manager,
     get_egress_guard,
@@ -19,6 +20,7 @@ __all__ = [
     "EgressProxy",
     "PlaywrightBrowserBackend",
     "browser_context",
+    "browser_page",
     "create_browser_manager",
     "get_browser_manager",
     "get_egress_guard",

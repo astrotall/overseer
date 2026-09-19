@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import os
 import threading
@@ -17,9 +18,11 @@ from libs.browser import EgressGuard, browser_context, init_browser_manager, res
 from libs.browser.session import BrowserSessionManager
 from libs.core.config import Settings
 from libs.tools import WebSearchTool
+from libs.tools import web_search as web_search_module
 from libs.tools.web_search import (
     MAX_RESULTS,
     SEARCH_BLOCKED_TEXT,
+    SEARCH_TIMEOUT_SUMMARY,
     SEARCH_UNAVAILABLE_TEXT,
     UNRECOGNIZED_PAGE_TEXT,
 )
@@ -30,6 +33,10 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.browser
 
 LIVE_QUERY = "python programming language"
+STALLED_QUERY = "stalled"
+STALL_LIMIT_S = 30.0
+SHORT_NAVIGATION_TIMEOUT_MS = 500
+TIMEOUT_CALL_DEADLINE_S = 20.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +101,7 @@ PAGES: dict[str, tuple[int, str]] = {
 class FakeDuckDuckGo:
     def __init__(self) -> None:
         self.requests: list[SeenRequest] = []
+        self.release = threading.Event()
         self._lock = threading.Lock()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -111,6 +119,7 @@ class FakeDuckDuckGo:
         self._thread.start()
 
     def stop(self) -> None:
+        self.release.set()
         self._server.shutdown()
         self._server.server_close()
 
@@ -130,6 +139,10 @@ class FakeDuckDuckGo:
 
                 with fake._lock:
                     fake.requests.append(SeenRequest(query, visitor, issued))
+
+                if query == STALLED_QUERY:
+                    fake.release.wait(STALL_LIMIT_S)
+                    return
 
                 status, body = PAGES.get(query, (200, _results_page()))
                 payload = body.encode()
@@ -309,6 +322,29 @@ async def test_an_unreachable_search_engine_is_an_error_not_a_crash(closed_port:
 
     assert result.is_error
     assert result.error == SEARCH_UNAVAILABLE_TEXT
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_a_search_engine_that_never_answers_times_out_with_a_clear_error(
+    monkeypatch: pytest.MonkeyPatch, fake_duckduckgo: FakeDuckDuckGo
+) -> None:
+    monkeypatch.setattr(web_search_module, "NAVIGATION_TIMEOUT_MS", SHORT_NAVIGATION_TIMEOUT_MS)
+    conversation_id = uuid.uuid4()
+
+    async with asyncio.timeout(TIMEOUT_CALL_DEADLINE_S):
+        result = await WebSearchTool(search_url=fake_duckduckgo.url).execute(
+            {"query": STALLED_QUERY}, conversation_id=conversation_id
+        )
+
+    assert result.is_error
+    assert result.error is not None
+    assert fake_duckduckgo.url in result.error
+    assert "0.5 с" in result.error
+    assert STALLED_QUERY not in result.error
+    assert result.error != SEARCH_UNAVAILABLE_TEXT
+    assert result.summary == SEARCH_TIMEOUT_SUMMARY
+    async with browser_context(conversation_id) as context:
+        assert context.pages == []
 
 
 @pytest.mark.usefixtures("browser_manager")
