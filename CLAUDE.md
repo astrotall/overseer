@@ -11,7 +11,9 @@
 | Файл | О чём |
 |---|---|
 | [product.md](.claude/knowledge/product.md) | что за продукт, принципы «мозг/руки», поток запроса, скоуп MVP, подтверждение необратимых действий |
-| [architecture.md](.claude/knowledge/architecture.md) | apps/ и libs/, роли PostgreSQL и Redis, миграции, что ещё не специфицировано |
+| [architecture.md](.claude/knowledge/architecture.md) | общий обзор: apps/ и libs/, `apps/api` (ChatService, инструменты, подтверждения, WS), LLM-контракт и протокол инструмента, роли PostgreSQL и Redis, миграции, что ещё не специфицировано |
+| [architecture-voice.md](.claude/knowledge/architecture-voice.md) | `apps/voice`: аудио, модель потоков, wake word, VAD, STT, TTS, клиент `/ws/chat`, голосовое подтверждение |
+| [architecture-browser.md](.claude/knowledge/architecture-browser.md) | `libs/browser` и браузерные инструменты: жизненный цикл Playwright, песочница, защита от SSRF, `web_search`, `open_page`, ошибки |
 | [testing.md](.claude/knowledge/testing.md) | чем гонять тесты и проверки, настройки ruff и mypy, чего в репозитории пока нет |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | ветки, Conventional Commits, задачи в Jira, пул-реквесты |
 
@@ -22,6 +24,8 @@
 
 @.claude/knowledge/product.md
 @.claude/knowledge/architecture.md
+@.claude/knowledge/architecture-voice.md
+@.claude/knowledge/architecture-browser.md
 @.claude/knowledge/testing.md
 @CONTRIBUTING.md
 

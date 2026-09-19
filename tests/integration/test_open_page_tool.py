@@ -610,7 +610,7 @@ async def test_the_browser_itself_cannot_reach_the_internal_network(
     os.getenv("CI") is not None,
     reason=(
         "живая внешняя страница никогда не открывается в CI — раннер без sandbox, "
-        "см. architecture.md, раздел «Песочница Chromium»"
+        "см. architecture-browser.md, раздел «Песочница Chromium»"
     ),
 )
 async def test_a_real_public_page_still_opens_through_the_egress_policy() -> None:

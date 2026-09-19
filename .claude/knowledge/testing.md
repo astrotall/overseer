@@ -91,7 +91,7 @@
   ```
 
   Разбор, что именно этим проверяется и почему без seccomp-профиля Chromium не стартует, —
-  в [architecture.md](architecture.md), раздел «Песочница Chromium»;
+  в [architecture-browser.md](architecture-browser.md), раздел «Песочница Chromium»;
 - `tests/integration/test_web_search_tool.py` — инструмент `web_search` (OVE-37) на **живом
   Chromium**, `@pytest.mark.browser`, с той же политикой, что у OVE-36: без Chromium — пропуск,
   под `CI` — исходная ошибка. Менеджер ставится процессным синглтоном `init_browser_manager()`,
@@ -114,7 +114,7 @@
   `@pytest.mark.skipif(os.getenv("CI") is not None, ...)` снимает его с прогона на этапе сбора
   тестов, до единого сетевого обращения, независимо от того, ответит ли DDG с этого раннера
   блокировкой, успехом или сетевой ошибкой: раннер без sandbox (см. «Песочница Chromium» в
-  [architecture.md](architecture.md)) не должен зависеть от того, отклонит ли DDG именно его —
+  [architecture-browser.md](architecture-browser.md)) не должен зависеть от того, отклонит ли DDG именно его —
   это чужое антибот-поведение, а не решение о безопасности CI. Локально поведение прежнее:
   распознанная блокировка (`SEARCH_BLOCKED_TEXT`) и сетевая недоступность — `SKIPPED` с
   объяснением, а нераспознанная страница по-прежнему падает — это поломка разбора, а не сети.
@@ -123,7 +123,7 @@
   `conversation_id` сквозь протокол держит `test_tool_protocol.py`, сквозь диспетчер —
   `test_the_dispatcher_hands_every_tool_the_conversation_it_runs_in` в
   `test_chat_service.py`, регистрацию в `lifespan` — `test_api_startup.py`. Разбор выбора
-  поисковика — в [architecture.md](architecture.md), раздел «Инструмент `web_search`». С OVE-38
+  поисковика — в [architecture-browser.md](architecture-browser.md), раздел «Инструмент `web_search`». С OVE-38
   весь трафик браузера идёт через прокси против SSRF, который запрещает loopback, поэтому
   менеджер здесь создаётся с `EgressGuard(exempt={(127.0.0.1, порт фейка), (127.0.0.1,
   закрытый порт)})` — точечно, по паре адрес+порт;
@@ -141,7 +141,7 @@
   проверяет **сырой** результат `page.evaluate()`: пределы абзацев и символов соблюдены до
   границы IPC. Протокол SOCKS5-прокси, политика адресов IPv4/IPv6 и запуск Chromium только через
   прокси — `tests/unit/test_browser_egress.py`, без браузера. Разбор — в
-  [architecture.md](architecture.md), раздел «Исходящий трафик браузера: защита от SSRF».
+  [architecture-browser.md](architecture-browser.md), раздел «Исходящий трафик браузера: защита от SSRF».
   Ошибки загрузки (OVE-39) — там же, на локальном сервере, который **намеренно не отвечает**
   (`/hang` — ни байта, `/stall` — заголовки и обрыв посреди тела): таймаут навигации
   подменяется на 500 мс (`monkeypatch` на `NAVIGATION_TIMEOUT_MS`), вызов обёрнут в
