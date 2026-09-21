@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import ipaddress
 import os
 import socket
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 import pytest
 
@@ -37,6 +38,8 @@ from libs.tools.open_page import (
     PAGE_CHANGED_TEXT,
     PAGE_TIMEOUT_SUMMARY,
     PAGE_UNAVAILABLE_TEXT,
+    REFRESH_CHAIN_TEXT,
+    REFRESH_TIMEOUT_SUMMARY,
     build_page_summary,
     extract_page,
 )
@@ -49,6 +52,10 @@ pytestmark = pytest.mark.browser
 LOOPBACK = ipaddress.IPv4Address("127.0.0.1")
 
 SHORT_NAVIGATION_TIMEOUT_MS = 500
+SHORT_REFRESH_TIMEOUT_MS = 500
+REFRESH_REPEATS = 20
+STUB_TITLE = "Перенаправление"
+STUB_PARAGRAPH = "Сейчас вы будете перенаправлены на нужную страницу."
 TIMEOUT_CALL_DEADLINE_S = 20.0
 
 KNOWN_TITLE = "Example Domain"
@@ -92,6 +99,14 @@ def _known_page() -> str:
     )
 
 
+def _refresh_stub(content: str) -> str:
+    return (
+        f"<!DOCTYPE html><html><head><title>{STUB_TITLE}</title>"
+        f'<meta http-equiv="refresh" content="{html.escape(content)}"></head>'
+        f"<body><main><p>{STUB_PARAGRAPH}</p></main></body></html>"
+    )
+
+
 PAGES: dict[str, tuple[int, str, str]] = {
     "/known": (200, "text/html; charset=utf-8", _known_page()),
     "/empty": (200, "text/html; charset=utf-8", "<html><head></head><body></body></html>"),
@@ -100,11 +115,19 @@ PAGES: dict[str, tuple[int, str, str]] = {
     "/data.json": (200, "application/json", '{"not": "html"}'),
     "/report.pdf": (200, "application/pdf", "%PDF-1.4 not a page"),
     "/attachment": (200, "text/html; charset=utf-8", "<html><body>saved, not shown</body></html>"),
+    "/refresh-header": (
+        200,
+        "text/html; charset=utf-8",
+        f"<html><head><title>{STUB_TITLE}</title></head><body><p>{STUB_PARAGRAPH}</p></body></html>",
+    ),
+    "/self-refresh": (200, "text/html; charset=utf-8", _refresh_stub("2; url=/self-refresh")),
 }
 
 EXTRA_HEADERS: dict[str, tuple[tuple[str, str], ...]] = {
     "/attachment": (("Content-Disposition", 'attachment; filename="page.html"'),),
+    "/refresh-header": (("Refresh", "0; url=/known"),),
 }
+
 
 STALLED_PATHS = frozenset({"/hang", "/stall"})
 STALL_LIMIT_S = 30.0
@@ -139,6 +162,9 @@ class FakePageServer:
     def redirect_url(self, target: str) -> str:
         return self.url(f"/redirect?to={quote(target, safe='')}")
 
+    def refresh_url(self, content: str) -> str:
+        return self.url(f"/refresh?{urlencode({'content': content})}")
+
     def start(self) -> None:
         self._thread.start()
 
@@ -169,6 +195,15 @@ class FakePageServer:
                     self.send_header("Location", parse_qs(parts.query)["to"][0])
                     self.send_header("Content-Length", "0")
                     self.end_headers()
+                    return
+
+                if parts.path == "/refresh":
+                    payload = _refresh_stub(parse_qs(parts.query)["content"][0]).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
                     return
 
                 if parts.path in STALLED_PATHS:
@@ -462,6 +497,143 @@ async def test_a_page_that_navigates_away_while_it_is_read_is_a_clear_failure(
 
     assert result.is_error
     assert result.error == PAGE_CHANGED_TEXT
+
+
+@pytest.mark.usefixtures("browser_manager")
+@pytest.mark.parametrize(
+    "content",
+    ["0; url=/known", "0;URL='/known'", "0, /known", "1; url=/known"],
+    ids=["immediate", "quoted", "without-url-prefix", "one-second"],
+)
+async def test_a_meta_refresh_stub_is_followed_to_the_real_page_every_time(
+    page_server: FakePageServer, content: str
+) -> None:
+    tool = OpenPageTool()
+
+    for _ in range(REFRESH_REPEATS if content.startswith("0") else 2):
+        result = await tool.execute(
+            {"url": page_server.refresh_url(content)}, conversation_id=uuid.uuid4()
+        )
+
+        assert not result.is_error, result.error
+        assert result.data == {
+            "title": KNOWN_TITLE,
+            "url": page_server.url("/known"),
+            "content": f"{KNOWN_PARAGRAPH_1}\n\n{KNOWN_PARAGRAPH_2}",
+        }
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_a_refresh_header_stub_is_followed_to_the_real_page(
+    page_server: FakePageServer,
+) -> None:
+    for _ in range(REFRESH_REPEATS):
+        result = await OpenPageTool().execute(
+            {"url": page_server.url("/refresh-header")}, conversation_id=uuid.uuid4()
+        )
+
+        assert not result.is_error, result.error
+        assert result.data["url"] == page_server.url("/known")
+        assert result.data["content"] == f"{KNOWN_PARAGRAPH_1}\n\n{KNOWN_PARAGRAPH_2}"
+
+
+@pytest.mark.usefixtures("browser_manager")
+@pytest.mark.parametrize(
+    "path", ["/refresh?content=3", "/self-refresh"], ids=["no-url", "same-url"]
+)
+async def test_a_page_that_only_refreshes_itself_is_returned_without_waiting(
+    page_server: FakePageServer, path: str
+) -> None:
+    url = page_server.url(path)
+
+    started = asyncio.get_running_loop().time()
+    result = await OpenPageTool().execute({"url": url}, conversation_id=uuid.uuid4())
+
+    assert asyncio.get_running_loop().time() - started < 2
+    assert not result.is_error, result.error
+    assert result.data == {"title": STUB_TITLE, "url": url, "content": STUB_PARAGRAPH}
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_a_refresh_too_far_in_the_future_is_reported_instead_of_waited_for(
+    page_server: FakePageServer,
+) -> None:
+    url = page_server.refresh_url("30; url=/known")
+
+    result = await OpenPageTool().execute({"url": url}, conversation_id=uuid.uuid4())
+
+    assert not result.is_error, result.error
+    assert result.data["content"] == STUB_PARAGRAPH
+    assert result.data["refresh_url"] == page_server.url("/known")
+    assert page_server.seen("/known") == []
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_a_refresh_to_a_missing_page_reports_the_target_status(
+    page_server: FakePageServer,
+) -> None:
+    result = await OpenPageTool().execute(
+        {"url": page_server.refresh_url("0; url=/not-found")}, conversation_id=uuid.uuid4()
+    )
+
+    assert result.is_error
+    assert result.error is not None
+    assert "404" in result.error
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_a_refresh_to_a_file_is_reported_as_not_html(page_server: FakePageServer) -> None:
+    result = await OpenPageTool().execute(
+        {"url": page_server.refresh_url("0; url=/report.pdf")}, conversation_id=uuid.uuid4()
+    )
+
+    assert result.error == NOT_HTML_TEXT
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_a_refresh_that_never_arrives_is_a_distinct_failure_not_the_stub(
+    monkeypatch: pytest.MonkeyPatch, page_server: FakePageServer
+) -> None:
+    monkeypatch.setattr(open_page_module, "REFRESH_TIMEOUT_MS", SHORT_REFRESH_TIMEOUT_MS)
+
+    async with asyncio.timeout(TIMEOUT_CALL_DEADLINE_S):
+        result = await OpenPageTool().execute(
+            {"url": page_server.refresh_url("0; url=/hang")}, conversation_id=uuid.uuid4()
+        )
+
+    assert result.is_error
+    assert result.error is not None
+    assert page_server.url("/hang") in result.error
+    assert STUB_PARAGRAPH not in result.error
+    assert result.summary == REFRESH_TIMEOUT_SUMMARY
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_a_refresh_chain_longer_than_the_limit_is_cut(page_server: FakePageServer) -> None:
+    url = page_server.url("/known")
+    for _ in range(open_page_module.MAX_REFRESH_HOPS + 1):
+        url = page_server.refresh_url(f"1; url={url}")
+
+    result = await OpenPageTool().execute({"url": url}, conversation_id=uuid.uuid4())
+
+    assert result.error == REFRESH_CHAIN_TEXT
+    assert page_server.seen("/known") == []
+
+
+@pytest.mark.usefixtures("browser_manager")
+@pytest.mark.parametrize("answers", [[["127.0.0.2"]], [["127.0.0.1"], ["127.0.0.2"]]])
+async def test_a_refresh_into_the_internal_network_is_refused(
+    page_server: FakePageServer, resolver: FakeResolver, answers: list[list[str]]
+) -> None:
+    resolver.answer("rebind.test", *answers)
+    target = f"http://rebind.test:{page_server.port}/known"
+
+    result = await OpenPageTool().execute(
+        {"url": page_server.refresh_url(f"1; url={target}")}, conversation_id=uuid.uuid4()
+    )
+
+    assert result.error == BLOCKED_ADDRESS_TEXT
+    assert page_server.seen("/known") == []
 
 
 @pytest.mark.usefixtures("browser_manager")

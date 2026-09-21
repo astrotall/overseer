@@ -12,9 +12,14 @@ from libs.tools.open_page import (
     MAX_URL_IN_ERROR_CHARS,
     MAX_URL_LENGTH,
     NAVIGATION_TIMEOUT_MS,
+    REFRESH_TIMEOUT_MS,
+    Refresh,
     _is_file_download,
     build_page_summary,
     page_timeout_text,
+    parse_refresh,
+    refresh_target,
+    refresh_timeout_text,
 )
 
 
@@ -140,3 +145,74 @@ def test_a_very_long_url_is_shortened_in_a_timeout_error() -> None:
 
     assert len(text) < MAX_URL_IN_ERROR_CHARS + 200
     assert "…" in text
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("0; url=/next", Refresh(0, "/next")),
+        ("0;URL='/next'", Refresh(0, "/next")),
+        ('5 ; url = "https://example.com/a b" trailing', Refresh(5, "https://example.com/a b")),
+        ("0, /next", Refresh(0, "/next")),
+        ("0; /next", Refresh(0, "/next")),
+        ("1.9; url=/next", Refresh(1, "/next")),
+        (".5; url=/next", Refresh(0, "/next")),
+        ("  3  ", Refresh(3, None)),
+        ("3", Refresh(3, None)),
+        ("0; url=", Refresh(0, None)),
+        ("0; urn:x", Refresh(0, "urn:x")),
+        ("0; url /next", Refresh(0, "url /next")),
+    ],
+)
+def test_a_refresh_is_parsed_like_the_browser_parses_it(content: str, expected: Refresh) -> None:
+    assert parse_refresh(content) == expected
+
+
+@pytest.mark.parametrize("content", ["", "soon", "url=/next", "0x; url=/next", "-1; url=/next"])
+def test_a_malformed_refresh_is_not_a_refresh(content: str) -> None:
+    assert parse_refresh(content) is None
+
+
+@pytest.mark.parametrize(
+    ("refresh", "base", "expected"),
+    [
+        (Refresh(0, "/next"), "https://example.com/stub", "https://example.com/next"),
+        (
+            Refresh(0, "next?x=1"),
+            "https://example.com/dir/stub",
+            "https://example.com/dir/next?x=1",
+        ),
+        (Refresh(0, "https://other.example/"), "https://example.com/", "https://other.example/"),
+        (Refresh(3, None), "https://example.com/stub", None),
+        (Refresh(0, "/stub"), "https://example.com/stub", None),
+        (Refresh(0, "#top"), "https://example.com/stub", None),
+        (Refresh(0, "HTTPS://Example.COM:443"), "https://example.com/", None),
+        (Refresh(0, "/stub?page=2"), "https://example.com/stub", "https://example.com/stub?page=2"),
+        (None, "https://example.com/stub", None),
+    ],
+)
+def test_only_a_refresh_to_another_document_has_a_target(
+    refresh: Refresh | None, base: str, expected: str | None
+) -> None:
+    assert refresh_target(refresh, base) == expected
+
+
+def test_a_refresh_timeout_names_the_target_and_the_wait() -> None:
+    text = refresh_timeout_text("https://slow.example/target")
+
+    assert "https://slow.example/target" in text
+    assert f"{REFRESH_TIMEOUT_MS // 1000} с" in text
+
+
+def test_a_pending_refresh_is_reported_only_when_there_is_one() -> None:
+    plain = build_page_summary(url="https://example.com/", title="t", paragraphs=[], fallback="")
+    pending = build_page_summary(
+        url="https://example.com/",
+        title="t",
+        paragraphs=[],
+        fallback="",
+        refresh_url="https://example.com/next",
+    )
+
+    assert "refresh_url" not in plain.model_dump(exclude_none=True)
+    assert pending.model_dump(exclude_none=True)["refresh_url"] == "https://example.com/next"
