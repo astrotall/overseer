@@ -894,7 +894,7 @@ Pydantic-модель, как и всё в `libs/llm/base.py`, с `extra="forbid
 
 Разделы вынесены в отдельный файл: [architecture-browser.md](architecture-browser.md) — жизненный
 цикл Playwright, песочница Chromium, защита от SSRF, инструменты `web_search` и `open_page`, ошибки
-браузерных инструментов.
+браузерных инструментов, страницы-заглушки с `<meta refresh>` (OVE-53).
 
 ### ORM-модели `libs/db/models`
 
