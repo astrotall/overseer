@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final
@@ -24,6 +25,7 @@ MAX_QUERY_LENGTH: Final = 500
 MAX_TITLE_CHARS: Final = 200
 MAX_SNIPPET_CHARS: Final = 300
 NAVIGATION_TIMEOUT_MS: Final = 15_000
+EXTRACTION_TIMEOUT_MS: Final = 15_000
 
 RESULT_SELECTOR: Final = ".result"
 NO_RESULTS_SELECTOR: Final = ".no-results, .result--no-result"
@@ -116,6 +118,15 @@ class WebSearchTool(Tool[WebSearchArguments]):
             return ToolResult.failed(SEARCH_UNAVAILABLE_TEXT)
 
         status = response.status if response is not None else None
+        try:
+            return await asyncio.wait_for(
+                self._read(page, status), timeout=EXTRACTION_TIMEOUT_MS / 1000
+            )
+        except TimeoutError:
+            logger.warning("web_search.extraction_timed_out", timeout_ms=EXTRACTION_TIMEOUT_MS)
+            return ToolResult.failed(extraction_timeout_text(), summary=SEARCH_TIMEOUT_SUMMARY)
+
+    async def _read(self, page: Page, status: int | None) -> ToolResult:
         if status in BLOCKED_STATUSES or await page.locator(CHALLENGE_SELECTOR).count():
             logger.warning("web_search.blocked", status=status)
             return ToolResult.failed(SEARCH_BLOCKED_TEXT)
@@ -139,6 +150,14 @@ class WebSearchTool(Tool[WebSearchArguments]):
 def search_timeout_text(search_url: str) -> str:
     return (
         f"Поисковик {search_url} не ответил за {NAVIGATION_TIMEOUT_MS / 1000:g} с. "
+        "Поиск не выполнен: скажи пользователю, что поиск сейчас не отвечает."
+    )
+
+
+def extraction_timeout_text() -> str:
+    return (
+        f"Страница выдачи загрузилась, но не отдала содержимое за "
+        f"{EXTRACTION_TIMEOUT_MS / 1000:g} с. "
         "Поиск не выполнен: скажи пользователю, что поиск сейчас не отвечает."
     )
 

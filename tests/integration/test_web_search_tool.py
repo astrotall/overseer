@@ -25,6 +25,7 @@ from libs.tools.web_search import (
     SEARCH_TIMEOUT_SUMMARY,
     SEARCH_UNAVAILABLE_TEXT,
     UNRECOGNIZED_PAGE_TEXT,
+    extraction_timeout_text,
 )
 
 if TYPE_CHECKING:
@@ -34,8 +35,10 @@ pytestmark = pytest.mark.browser
 
 LIVE_QUERY = "python programming language"
 STALLED_QUERY = "stalled"
+REFRESH_TO_STALL_QUERY = "refresh-to-stall"
 STALL_LIMIT_S = 30.0
 SHORT_NAVIGATION_TIMEOUT_MS = 500
+SHORT_EXTRACTION_TIMEOUT_MS = 500
 TIMEOUT_CALL_DEADLINE_S = 20.0
 
 
@@ -75,6 +78,16 @@ def _results_page() -> str:
     )
     duplicate = _result("Дубликат", "https://site0.example/page", "тот же адрес")
     return _page(f'<div id="links">{ad}{organic[0]}{duplicate}{"".join(organic[1:])}</div>')
+
+
+def _refreshing_page(search_url: str) -> str:
+    stalled = f"{search_url}?q={STALLED_QUERY}"
+    return (
+        "<!DOCTYPE html><html><head><title>DuckDuckGo</title>"
+        f'<meta http-equiv="refresh" content="0; url={stalled}"></head>'
+        f'<body><div id="links">{_result("Заглушка", "https://stub.example/", "ещё грузится")}'
+        "</div></body></html>"
+    )
 
 
 PAGES: dict[str, tuple[int, str]] = {
@@ -144,7 +157,10 @@ class FakeDuckDuckGo:
                     fake.release.wait(STALL_LIMIT_S)
                     return
 
-                status, body = PAGES.get(query, (200, _results_page()))
+                if query == REFRESH_TO_STALL_QUERY:
+                    status, body = 200, _refreshing_page(fake.url)
+                else:
+                    status, body = PAGES.get(query, (200, _results_page()))
                 payload = body.encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -343,6 +359,30 @@ async def test_a_search_engine_that_never_answers_times_out_with_a_clear_error(
     assert STALLED_QUERY not in result.error
     assert result.error != SEARCH_UNAVAILABLE_TEXT
     assert result.summary == SEARCH_TIMEOUT_SUMMARY
+    async with browser_context(conversation_id) as context:
+        assert context.pages == []
+
+
+@pytest.mark.usefixtures("browser_manager")
+async def test_a_results_page_that_stops_answering_mid_read_times_out_instead_of_hanging(
+    monkeypatch: pytest.MonkeyPatch, fake_duckduckgo: FakeDuckDuckGo
+) -> None:
+    monkeypatch.setattr(web_search_module, "EXTRACTION_TIMEOUT_MS", SHORT_EXTRACTION_TIMEOUT_MS)
+    conversation_id = uuid.uuid4()
+
+    async with asyncio.timeout(TIMEOUT_CALL_DEADLINE_S):
+        result = await WebSearchTool(search_url=fake_duckduckgo.url).execute(
+            {"query": REFRESH_TO_STALL_QUERY}, conversation_id=conversation_id
+        )
+
+    assert result.is_error
+    assert result.error is not None
+    assert "0.5 с" in result.error
+    assert result.error == extraction_timeout_text()
+    assert REFRESH_TO_STALL_QUERY not in result.error
+    assert result.error != SEARCH_UNAVAILABLE_TEXT
+    assert result.summary == SEARCH_TIMEOUT_SUMMARY
+    assert "stub.example" not in result.model_dump_json()
     async with browser_context(conversation_id) as context:
         assert context.pages == []
 
