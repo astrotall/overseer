@@ -35,6 +35,9 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
 ]
+executor = [
+    "pywin32>=310; sys_platform == 'win32'",
+]
 voice = [
     "faster-whisper>=1.1",
     "openwakeword>=0.6.0",
@@ -64,7 +67,7 @@ markers = [
 [tool.coverage.run]
 source = ["apps", "libs"]
 branch = true
-omit = ["*/__pycache__/*", "apps/executor/*"]
+omit = ["*/__pycache__/*"]
 
 [tool.coverage.report]
 show_missing = true

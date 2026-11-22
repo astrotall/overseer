@@ -220,6 +220,24 @@
   `running`), и следующая аренда обязана выдать новый контекст, а не сохранённый мёртвый.
   Тест краснеет ровно на снятой проверке `connected` в `_lease()` — до OVE-36 повторная
   аренда смотрела только на наличие записи в таблице сессий;
+- `apps/executor` (OVE-41) — `tests/unit/test_executor_excel_validation.py` (разбор A1 с
+  многобуквенными столбцами и границами листа, имена листов, форма, типы и лимит данных,
+  формулы как литеральный текст по умолчанию и по опт-ину, пути и форматы сохранения),
+  `test_executor_com_errors.py` (каждая пара HRESULT → исключение на фейковых `com_error`,
+  включая знаковые коды pywin32 и `DISP_E_EXCEPTION` со `scode` внутри; текст COM-ошибки с
+  путём остаётся в логе и не попадает в сообщение исключения), `test_executor_sta.py`
+  (все вызовы на одном потоке, не потоке цикла; `initialize`/`finalize` там же; `stop()`
+  резолвит висящий и очередные вызовы, при таймауте джойна оставляет ссылку на поток и
+  запрещает второй `start()`; двойной резолв не кидает в обработчик цикла; вызов, чей
+  ожидающий сдался, не исполняется), `test_executor_excel_controller.py` (контроллер на
+  фейковом бэкенде: маршалинг, открыть/создать/переключить книгу, запись, сохранение и
+  запрет перезаписи, таймаут зависшего вызова, `aclose()`, не ждущий за ним, отказ
+  настоящего бэкенда вне Windows) и `test_executor_ci_isolation.py` (каждый модуль пакета
+  импортируется с заблокированными `win32com`, `pythoncom`, `pywintypes` и остальным
+  pywin32 — тем же приёмом, что `test_voice_ci_isolation.py`). Живой COM —
+  `tests/integration/test_excel_com_windows.py` (`@pytest.mark.windows`): запись и
+  сохранение, формула по `HasFormula`, отсутствие осиротевшего `EXCEL.EXE`, нетронутый
+  экземпляр пользователя, занятый файл. **На Windows этот файл ни разу не запускался**;
 - секции `[tool.pytest.ini_options]` и `[tool.coverage.*]` в `pyproject.toml`;
 - `.pre-commit-config.yaml` — хуки на трёх стадиях (`pre-commit`, `commit-msg`, `pre-push`);
 - `.github/workflows/ci.yml` — CI на GitHub Actions.
@@ -241,6 +259,11 @@ Chromium, — в образе `apps/api` (`docker/Dockerfile.api` ставит �
 `tests/integration/test_web_search_tool.py`, а юнит-тесты менеджера сессий и разбора выдачи
 работают в любом окружении — `libs/browser/session.py` про Playwright ничего не знает, а
 `libs/browser/backend.py` импортирует его лениво, при первом запуске браузера.
+
+Отдельно живёт группа `executor` (`pywin32; sys_platform == 'win32'`): маркер платформы
+делает её пустой на macOS и Linux, поэтому `uv sync --dev`, `uv sync --all-groups` и CI её
+никогда не ставят, а `uv.lock` содержит pywin32 с тем же маркером. Ставится только на Windows,
+где реально ходят в COM, — `uv sync --group executor`.
 
 Отдельно живёт группа `voice` (`openwakeword`, `sounddevice`, `faster-whisper`, `torch`):
 она ставится только на машине, где реально слушают микрофон и говорят в динамик, —
@@ -314,7 +337,9 @@ docker compose -f docker/docker-compose.yml up -d postgres redis
 ## Покрытие
 
 `[tool.coverage.run]`: `source = ["apps", "libs"]`, `branch = true`,
-`omit` — `__pycache__` и `apps/executor/*` (его нельзя выполнить вне Windows, см. ниже).
+`omit` — `__pycache__`. `apps/executor` из покрытия больше не исключён (до OVE-41 он был
+пустым пакетом, который вне Windows не выполнить): его чистая часть гоняется в CI, а
+непокрытым честно остаётся `com_backend.py`, которому нужен живой COM.
 `[tool.coverage.report]`: `show_missing`, `skip_covered`, и `exclude_lines` для
 `pragma: no cover`, `if TYPE_CHECKING:`, `raise NotImplementedError` и `...` (тела
 абстрактных методов в `libs/llm/base.py`).
@@ -371,9 +396,12 @@ PostgreSQL и Redis из `apps/api/main.py`. Роутам, которым нуж
   `tests/integration/`: маркер `integration` в проекте означает живые PostgreSQL и Redis, а
   браузеру нужен другой внешний движок — смешивать их в одном маркере значило бы требовать
   базу там, где её нет.
-- `apps/executor` тестируется только на Windows: COM/win32com и Playwright с живым профилем
-  не работают в контейнере и в CI на Linux. Такие тесты помечаются `@pytest.mark.windows` и
-  пропускаются вне Windows — падать в общем прогоне они не должны.
+- `apps/executor`: всё, что не ходит в настоящий COM (валидация, STA-поток, разбор HRESULT,
+  контроллер на фейковом бэкенде), — обычные юнит-тесты, идут в CI. Тесты с живым Excel
+  помечаются `@pytest.mark.windows`, лежат в `tests/integration/` и вне Windows пропускаются
+  **сами**: хук `pytest_collection_modifyitems` в `tests/conftest.py` вешает на них `skip`,
+  если `sys.platform != "win32"`, — `skipif` в каждом файле не нужен. На Windows их запуск —
+  `uv sync --group executor && uv run pytest -m windows`.
 
 ## Настройки линтера и типов
 
