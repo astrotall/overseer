@@ -14,6 +14,7 @@
 | [architecture.md](.claude/knowledge/architecture.md) | общий обзор: apps/ и libs/, `apps/api` (ChatService, инструменты, подтверждения, WS), LLM-контракт и протокол инструмента, роли PostgreSQL и Redis, миграции, что ещё не специфицировано |
 | [architecture-voice.md](.claude/knowledge/architecture-voice.md) | `apps/voice`: аудио, модель потоков, wake word, VAD, STT, TTS, клиент `/ws/chat`, голосовое подтверждение |
 | [architecture-browser.md](.claude/knowledge/architecture-browser.md) | `libs/browser` и браузерные инструменты: жизненный цикл Playwright, песочница, защита от SSRF, `web_search`, `open_page`, ошибки |
+| [architecture-executor.md](.claude/knowledge/architecture-executor.md) | `apps/executor` и COM-контроллеры: `ExcelController`, STA-поток, свой экземпляр Excel, «не трогай Excel пользователя», формулы как текст, исключения `Office*`, что не проверено на Windows |
 | [testing.md](.claude/knowledge/testing.md) | чем гонять тесты и проверки, настройки ruff и mypy, чего в репозитории пока нет |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | ветки, Conventional Commits, задачи в Jira, пул-реквесты |
 
@@ -26,6 +27,7 @@
 @.claude/knowledge/architecture.md
 @.claude/knowledge/architecture-voice.md
 @.claude/knowledge/architecture-browser.md
+@.claude/knowledge/architecture-executor.md
 @.claude/knowledge/testing.md
 @CONTRIBUTING.md
 
@@ -39,12 +41,14 @@
   PostgreSQL и Redis.
 - `apps/worker` — Arq-воркер: фоновые и долгие задачи, цепочки рассуждений, инструменты,
   исполняемые прямо на Python.
-- `apps/executor` — **заготовка под Windows-сервис** (COM/win32com, Playwright с профилем
-  пользователя, GUI). Пустой пакет, в Docker-сборку не входит. Текущее окружение разработки
-  — macOS/Linux + Docker, поэтому код отсюда, скорее всего, **не запустится и не
-  оттестируется здесь напрямую**: писать его можно, но не пытайся выполнять или тестировать,
-  пока об этом явно не попросили и не подтвердили, что окружение это поддерживает. Детали —
-  в `apps/executor/README.md`.
+- `apps/executor` — **Windows-процесс на машине пользователя** (COM/win32com, Playwright с
+  профилем пользователя, GUI), в Docker-сборку не входит. Пока в нём только `ExcelController`
+  (OVE-41) без транспорта. Чистая часть (валидация, STA-поток, разбор HRESULT, контроллер на
+  фейковом бэкенде) импортируется и тестируется на любой ОС; всё, что ходит в настоящий COM,
+  текущее окружение разработки (macOS/Linux + Docker) **не запустит**: такие тесты помечены
+  `@pytest.mark.windows` и вне Windows пропускаются. Не пытайся выполнять реальный COM, пока об
+  этом явно не попросили и не подтвердили, что окружение это поддерживает. Детали — в
+  [architecture-executor.md](.claude/knowledge/architecture-executor.md).
 - `libs/core` — конфиг (pydantic-settings), логи (structlog), исключения.
 - `libs/db` — SQLAlchemy `Base`, async engine и session, Redis, ORM-модели.
 - `libs/llm` — клиенты Anthropic и DeepSeek, провайдер-независимый контракт под tool-calling.

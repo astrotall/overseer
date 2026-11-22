@@ -82,7 +82,10 @@ HTML-версию DuckDuckGo в headless-браузере разговора, д
 инструмент это распознаёт и честно сообщает модели, но искать с такой сети не может
 (разбор — в [architecture-browser.md](architecture-browser.md), раздел «Инструмент `web_search`»).
 
-Не реализован `apps/executor` — всё ещё пустой пакет с README. ORM-модели, наоборот,
+В `apps/executor` есть первый COM-контроллер — `ExcelController` (OVE-41): открыть или
+создать книгу, записать диапазон, сохранить; ни транспорта до него (OVE-29), ни инструментов
+Excel над ним ещё нет, а на живом Windows он не запускался — см.
+[architecture-executor.md](architecture-executor.md). ORM-модели тоже
 уже есть: `Conversation` и `Message` (OVE-11) вместе с первой Alembic-миграцией.
 
 Тесты выросли вместе с бизнес-логикой и «пустым `tests/unit/`» давно не описываются: в

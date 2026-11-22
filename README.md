@@ -125,8 +125,8 @@ overseer/
 │   │   ├── deps.py          #   SessionDep / RedisDep / SettingsDep
 │   │   └── routes/          #   health.py, ws.py
 │   ├── worker/              # Arq worker: background and long-running tasks
-│   ├── executor/            # STUB: a separate Windows service outside Docker
-│   │                        #   (COM/Playwright); see apps/executor/README.md
+│   ├── executor/            # a separate Windows process outside Docker (COM/Playwright);
+│   │                        #   so far only the Excel COM controller, no transport
 │   └── voice/               # a local cross-platform voice client outside Docker,
 │                            #   a /ws/chat client; mic to text and text to speech work,
 │                            #   the socket is pending — see apps/voice/README.md
@@ -339,7 +339,13 @@ job; we do not merge a red CI.
   paused turn resumes from there: the tool runs (or is skipped on a rejection), the round
   is persisted as a matching `tool_use` + `tool_result` pair, and the model is asked for
   the rest of the turn. There is no WebSocket envelope for answering yet;
-- ⏳ `apps/executor` (COM/Playwright) — an empty package with a README;
+- 🚧 `apps/executor` (COM/Playwright) — the first COM controller, `ExcelController`
+  (OVE-41): open or create a workbook, write a range, save. All COM calls run on one
+  dedicated STA thread, Excel is a private `DispatchEx` instance (the user's own Excel is
+  never attached to or quit), and model-supplied strings are written as literal text unless
+  formulas are explicitly requested. No transport to `api`/`worker` (OVE-29) and no Excel
+  tools yet; everything that needs real COM is tested only on Windows and has not been run
+  there yet;
 - ✅ `libs/browser` — the Playwright session lifecycle (OVE-36): a headless Chromium started
   lazily inside the `apps/api` process, one `BrowserContext` per conversation so that
   cookies and logins survive across turns, a lease that keeps a context from being closed

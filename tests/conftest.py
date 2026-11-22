@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
@@ -26,6 +27,16 @@ from libs.core.config import Settings, get_settings
 from libs.db import models
 from libs.llm import ToolCall
 from libs.tools import init_tool_registry, reset_tool_registry
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    if sys.platform == "win32":
+        return
+
+    skip = pytest.mark.skip(reason="требует Windows и live-сессии пользователя (apps/executor)")
+    for item in items:
+        if item.get_closest_marker("windows") is not None:
+            item.add_marker(skip)
 
 
 @pytest.fixture(scope="session")
