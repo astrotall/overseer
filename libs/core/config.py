@@ -29,8 +29,15 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = False
 
-    database_url: str = "postgresql+asyncpg://overseer:overseer@localhost:55432/overseer"
-    redis_url: str = "redis://localhost:56379/0"
+    database_url: str = "postgresql+asyncpg://overseer:overseer@127.0.0.1:55432/overseer"
+    redis_url: str = Field(
+        default="redis://default:overseer@127.0.0.1:56379/0",
+        description=(
+            "Redis требует пароль (OVE-59): redis://<пользователь>:<пароль>@<хост>:<порт>/<база>. "
+            "Пароль только из URL-безопасных символов: Arq не раскодирует %-последовательности, "
+            "а redis-py раскодирует, и они разошлись бы."
+        ),
+    )
     database_url_test: str | None = Field(
         default=None,
         description=(

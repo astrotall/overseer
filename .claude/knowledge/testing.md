@@ -379,6 +379,14 @@ docker compose -f docker/docker-compose.yml exec postgres createdb -U overseer o
 Почему отдельная база, а не testcontainers — обоснование в
 [README.md](../../README.md), раздел «База данных для тестов»; не дублируй его здесь.
 
+Redis для тестов — та же схема: `REDIS_URL_TEST`, а без него `test_redis_url` берёт
+`REDIS_URL` и подставляет соседний номер логической базы, **сохраняя пользователя и пароль**
+(пришпилено в `tests/unit/test_redis_test_fixtures.py`). Недоступный Redis фикстура
+`redis_client` пропускает по тому же правилу, что и базу. Redis, который ответил `NOAUTH` или
+`WRONGPASS`, — **ошибка, а не пропуск**, и под `CI`, и локально: он доступен, но настроен не
+так, и чаще всего это `.env`, оставшийся от времени, когда Redis был без пароля (до OVE-59).
+Пароль в сообщениях фикстуры заменяется на `***`.
+
 ## Фикстуры из `tests/conftest.py`
 
 | Фикстура | Область | Что даёт |
@@ -464,21 +472,24 @@ pytest гоняются через `uv run`, теми же версиями, ч�
 `concurrency: cancel-in-progress`. Сервис-контейнеры `postgres:16-alpine` и `redis:7-alpine`
 (оба с healthcheck) публикуются на стандартных `5432` / `6379` — не на локальных `55432` /
 `56379` из `.env.example`; адреса задаются переменными job: `DATABASE_URL`,
-`DATABASE_URL_TEST`, `REDIS_URL`.
+`DATABASE_URL_TEST`, `REDIS_URL`. Redis в CI требует пароль, как и в docker compose (OVE-59):
+сервис-контейнеру нельзя передать `command`, поэтому самый первый шаг джобы включает
+`requirepass` на живом Redis через `docker exec`, а `REDIS_URL` несёт тот же пароль.
 
 Шаги по порядку:
 
-1. `astral-sh/setup-uv` с кэшем, `uv sync --dev --group browser` и
+1. `docker exec <redis> redis-cli CONFIG SET requirepass …` — пароль Redis (см. выше);
+2. `astral-sh/setup-uv` с кэшем, `uv sync --dev --group browser` и
    `uv run playwright install --with-deps chromium` — Chromium ставится в CI, потому что
    тесты жизненного цикла браузера гоняются на настоящем движке, а не на фейке;
-2. `uv run ruff check .` — линт;
-3. `uv run ruff format --check .` — форматирование;
-4. `uv run mypy apps libs` — типы;
-5. `uv run alembic upgrade head` — миграции обязаны накатываться на чистую базу. Это ловит
+3. `uv run ruff check .` — линт;
+4. `uv run ruff format --check .` — форматирование;
+5. `uv run mypy apps libs` — типы;
+6. `uv run alembic upgrade head` — миграции обязаны накатываться на чистую базу. Это ловит
    самую частую поломку: модель добавили, миграцию забыли;
-6. `psql ... -c 'CREATE DATABASE overseer_test'` — тестовая база;
-7. `uv run pytest --cov --cov-report=term-missing --cov-report=xml`;
-8. загрузка `coverage.xml` артефактом (`if: always()`, `if-no-files-found: ignore`).
+7. `psql ... -c 'CREATE DATABASE overseer_test'` — тестовая база;
+8. `uv run pytest --cov --cov-report=term-missing --cov-report=xml`;
+9. загрузка `coverage.xml` артефактом (`if: always()`, `if-no-files-found: ignore`).
 
 Падение любого шага роняет джобу. Красный CI не мержим.
 

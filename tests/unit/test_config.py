@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+from arq.connections import RedisSettings
+from redis.asyncio.connection import parse_url
 
 from libs.core.config import Settings, validate_llm_provider_key
 from libs.core.exceptions import ConfigurationError
@@ -34,3 +36,18 @@ def test_validate_llm_provider_key_passes_when_anthropic_key_is_set() -> None:
     )
 
     validate_llm_provider_key(settings)
+
+
+def test_arq_and_redis_py_read_the_default_redis_url_the_same_way() -> None:
+    default = Settings.model_fields["redis_url"].default
+    arq = RedisSettings.from_dsn(default)
+
+    assert parse_url(default) == {
+        "username": arq.username,
+        "password": arq.password,
+        "host": arq.host,
+        "port": arq.port,
+        "db": arq.database,
+    }
+    assert arq.password
+    assert arq.host == "127.0.0.1"

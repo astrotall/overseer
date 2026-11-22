@@ -42,7 +42,7 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://overseer:overseer@localhost:5432/overseer
       DATABASE_URL_TEST: postgresql+asyncpg://overseer:overseer@localhost:5432/overseer_test
-      REDIS_URL: redis://localhost:6379/0
+      REDIS_URL: redis://default:overseer@localhost:6379/0
       # Ubuntu 24.04 (ubuntu-latest) ограничивает непривилегированные user
       # namespace'ы через AppArmor, а без них песочница Chromium не поднимается.
       # Браузерные тесты здесь открывают только локальный контент: set_content и
@@ -54,6 +54,12 @@ jobs:
       BROWSER_NO_SANDBOX: "true"
 
     steps:
+      # Сервис-контейнеру нельзя передать command, поэтому пароль включается на живом
+      # Redis — тот же, что в REDIS_URL: CI проходит тот же путь с AUTH, что и
+      # docker compose (OVE-59).
+      - name: Require a Redis password
+        run: docker exec ${{ job.services.redis.id }} redis-cli CONFIG SET requirepass overseer
+
       - uses: actions/checkout@v4
 
       - name: Install uv
