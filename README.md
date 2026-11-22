@@ -343,8 +343,10 @@ job; we do not merge a red CI.
   (OVE-41): open or create a workbook, write a range, save. All COM calls run on one
   dedicated STA thread, Excel is a private `DispatchEx` instance (the user's own Excel is
   never attached to or quit), and model-supplied strings are written as literal text unless
-  formulas are explicitly requested. No transport to `api`/`worker` (OVE-29) and no Excel
-  tools yet; everything that needs real COM is tested only on Windows and has not been run
+  formulas are explicitly requested. The transport to `api` is designed (OVE-29: a Redis
+  list queue with a heartbeat, at-most-once delivery); only the message contract
+  (`libs/schemas/executor.py`) and the `ExecutorClient` port with a fake exist so far, and
+  there are no Excel tools yet; everything that needs real COM is tested only on Windows and has not been run
   there yet;
 - ✅ `libs/browser` — the Playwright session lifecycle (OVE-36): a headless Chromium started
   lazily inside the `apps/api` process, one `BrowserContext` per conversation so that

@@ -41,10 +41,16 @@ uv run pytest -m windows
 Тесты с живым Excel написаны, но **на Windows ещё не запускались** — что именно не проверено,
 перечислено в architecture-executor.md.
 
-## Как будет общаться с `api` и `worker`
+## Как общается с `api`
 
-Не решено (OVE-29). Основной кандидат — **Redis pub/sub**: `api`/`worker` публикуют команду в
-`overseer:executor:cmd`, executor отвечает в `overseer:executor:result:<request_id>`; плюс в
-том, что executor сам инициирует соединение и входящий порт на машине пользователя не нужен.
-Запасной вариант — локальный HTTP-сервер на стороне executor. Контроллер от транспорта не
-зависит: это класс с async-методами, и как запрос до него доходит, решает OVE-29.
+Спроектировано в OVE-29: `api` кладёт запрос в Redis-список `overseer:executor:requests`, executor
+забирает его, отвечает `accepted` и результатом в `overseer:executor:reply:<id>` и раз в 5 с
+обновляет heartbeat-ключ с TTL — по нему `api` узнаёт, запущен ли executor. Доставка at-most-once,
+операции — закрытый allowlist. Входящий порт на машине пользователя не нужен: соединение
+инициирует executor.
+
+Контракт сообщений — `libs/schemas/executor.py`, порт клиента и фейк — `libs/executor/`. Цикла
+приёма и `ExecutorSettings` ещё нет. До их реализации Redis обязан быть закрыт: сейчас compose
+публикует его на всех интерфейсах без пароля. Решение целиком — в
+[.claude/knowledge/architecture-executor.md](../../.claude/knowledge/architecture-executor.md),
+раздел «Транспорт `apps/api` ↔ `apps/executor`».

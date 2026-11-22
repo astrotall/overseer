@@ -542,10 +542,31 @@ Python (БД, HTTP, файлы). Сейчас — smoke-задача `ping`.
 ### `apps/executor` — процесс на машине пользователя (OVE-41)
 
 Раздел вынесен в отдельный файл: [architecture-executor.md](architecture-executor.md) — зачем
-отдельный процесс вне Docker, незафиксированный транспорт до `api`/`worker` (OVE-29) и первый
-COM-контроллер `ExcelController` (OVE-41): STA-поток, свой экземпляр Excel через `DispatchEx`,
-правило «не трогай Excel пользователя», формулы как литеральный текст по умолчанию и общие для
-Office исключения `Office*` в `libs/core/exceptions.py`.
+отдельный процесс вне Docker, транспорт до `api` (OVE-29) и первый COM-контроллер
+`ExcelController` (OVE-41): STA-поток, свой экземпляр Excel через `DispatchEx`, правило «не трогай
+Excel пользователя», формулы как литеральный текст по умолчанию и общие для Office исключения
+`Office*` в `libs/core/exceptions.py`.
+
+#### Вызов executor со стороны api — коротко (OVE-29)
+
+Полное решение — «Транспорт `apps/api` ↔ `apps/executor`» в
+[architecture-executor.md](architecture-executor.md); здесь то, что надо знать на стороне api:
+
+- **транспорт** — Redis-список `overseer:executor:requests`, ответ в персональный список
+  `overseer:executor:reply:<id>` (`accepted`, затем `result`), живость — ключ heartbeat с TTL.
+  Pub/sub, Arq и HTTP-сервер в executor отклонены, разбор там же;
+- **удалённый инструмент — обычный `Tool`**: в `_execute` он собирает запрос из
+  `libs/schemas/executor.py`, зовёт порт `ExecutorClient.call()` (`libs/executor/`) и переводит
+  ответ в `ToolResult`, ошибку — через `failure_result()`. Порт тотальный: сбой транспорта — это
+  ответ с кодом, а не исключение. В тестах — `FakeExecutorClient`;
+- **старт api от executor не зависит**: отказ — на вызове, за одно `GET` heartbeat, если executor не
+  запущен, и не дольше 5 с пикапа, если он упал только что. Долго (до бюджета 70 с) ход держит
+  соединение с PostgreSQL только когда executor жив и Excel медленный — тот же принятый риск, что
+  в «Удержание DB-соединения» выше;
+- **at-most-once**: api не повторяет вызов никогда; исход «неизвестно» уходит модели фиксированной
+  фразой `UNKNOWN_OUTCOME_TEXT` без текста COM;
+- **блокер реализации**: Redis сейчас опубликован на всех интерфейсах без пароля — до привязки к
+  loopback и ACL ни один запрос в executor по нему ходить не должен.
 
 ### `apps/voice` — голосовой клиент (OVE-44)
 
@@ -563,6 +584,7 @@ Office исключения `Office*` в `libs/core/exceptions.py`.
 | `libs/tools` | реестр инструментов агента — описание для function calling + исполнитель; протокол инструмента (`base.py`, OVE-20; `conversation_id` рядом с аргументами — OVE-37) и реестр (`registry.py`, OVE-21) зафиксированы, цикл вызова живёт в `ChatService` (OVE-22); первый реальный инструмент — `web_search.py` (OVE-37) |
 | `libs/schemas` | Pydantic v2 DTO |
 | `libs/browser` | жизненный цикл браузера Playwright: `BrowserSessionManager` (контекст на разговор, аренды, закрытие по простою — `session.py`) и `PlaywrightBrowserBackend` с процессным синглтоном и `browser_page()` — страница с ограниченным по времени закрытием (`backend.py`, OVE-36, OVE-39); политика исходящего трафика и SOCKS5-прокси против SSRF (`egress.py`, OVE-38) |
+| `libs/executor` | порт до `apps/executor`: `ExecutorClient` (протокол, тотальный `call()`), фиксированные тексты для модели по кодам ошибок и `failure_result()` (`client.py`) и `FakeExecutorClient` для тестов (`fake.py`), OVE-29; Redis-реализации порта ещё нет. Контракт сообщений — `libs/schemas/executor.py` |
 | `libs/confirmations` | ожидающие подтверждения необратимых действий: `PendingConfirmation` и `ConfirmationStore` поверх Redis с TTL и атомарным захватом `claim_pending()` (`store.py`, OVE-25/27) и сигнал паузы хода `ConfirmationRequiredError` (`signals.py`, OVE-26) |
 
 ### Контракт `libs/llm/base.py`
@@ -656,7 +678,8 @@ override, а токены всё равно некуда стримить — We
 следующий старт в том же процессе получил бы из кэша клиента с уже закрытым HTTP-соединением.
 
 Инструменты, требующие Windows/COM/Playwright, будут исполняться в `apps/executor` — в
-`libs/tools` попадёт только их описание и прокси-вызов. Первый слой под ними уже есть —
+`libs/tools` попадёт только их описание и прокси-вызов через порт `ExecutorClient` (OVE-29, см.
+«Вызов executor со стороны api» выше). Первый слой под ними уже есть —
 `ExcelController` (OVE-41, см. [architecture-executor.md](architecture-executor.md)). Сам протокол инструмента уже
 зафиксирован — см. следующий раздел.
 
@@ -921,8 +944,8 @@ SQL `NULL`.
 вызовов инструментов (аудит: что вызвали, с какими аргументами, что вернулось). Первые
 ORM-модели — `Conversation` и `Message`, см. раздел «ORM-модели `libs/db/models`» выше.
 
-**Redis 7** — очередь Arq, pub/sub событий (в том числе канал до `executor`), кэш контекста,
-rate limiting.
+**Redis 7** — очередь Arq, очередь запросов до `executor` и его heartbeat (OVE-29, списки и
+ключи с TTL, не pub/sub), ожидающие подтверждения, кэш контекста, rate limiting.
 
 ## Миграции
 
@@ -956,9 +979,9 @@ uv run alembic downgrade -1
 Так же не зафиксированы: типы WebSocket-конвертов сверх `message` / `reply` /
 `confirmation_required` / `error` (стриминг токенов, статусы вызова инструментов — эпик 5;
 сам конверт и его базовые типы зафиксированы, см. «WebSocket-протокол `/ws/chat`» выше),
-протокол между `worker` и `executor` (OVE-29; контроллер под ним, `ExcelController`, уже есть и
-от транспорта не зависит — см. [architecture-executor.md](architecture-executor.md)), схема
-хранения памяти агента.
+реализация транспорта до `executor` (сам протокол спроектирован в OVE-29, контракт сообщений и порт
+уже в коде — см. [architecture-executor.md](architecture-executor.md); вызов executor из
+`apps/worker` в v1 не предусмотрен), схема хранения памяти агента.
 
 Подтверждение необратимых действий зафиксировано **целиком**: как ход останавливается и где
 живёт ожидающее подтверждение (OVE-25, OVE-26), и как пользователь отвечает «да» или «нет»,

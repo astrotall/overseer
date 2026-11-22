@@ -17,12 +17,10 @@
 
 В `docker-compose.yml` executor не входит и входить не должен.
 
-**Транспорт до `api`/`worker` не зафиксирован (OVE-29).** Основной кандидат — Redis pub/sub
-(`overseer:executor:cmd` → `overseer:executor:result:<request_id>`): executor сам инициирует
-соединение, входящий порт на машине пользователя не нужен. Запасной вариант — локальный
-HTTP-сервер на стороне executor. Детали — в `apps/executor/README.md`. Ничего из того, что описано
-ниже, о транспорте не знает: контроллер — это класс с async-методами, и как запрос до него дошёл,
-решает OVE-29.
+**Транспорт до `api` спроектирован (OVE-29)** — Redis-список запросов, персональный ключ ответа и
+heartbeat с TTL, доставка at-most-once; см. «Транспорт `apps/api` ↔ `apps/executor`» ниже. Контракт
+сообщений и порт клиента уже в коде, Redis-сторона — ещё нет. Контроллер о транспорте не знает:
+это класс с async-методами, и как запрос до него дошёл, решает транспорт.
 
 ## `ExcelController` (OVE-41) — первый COM-контроллер
 
@@ -347,9 +345,397 @@ HRESULT → исключение на фейковых `com_error`, редакц
 Первый прогон на Windows (`uv sync --group executor`, затем `uv run pytest -m windows`)
 подтвердит это или покажет, где ожидание неверно.
 
+## Транспорт `apps/api` ↔ `apps/executor` (OVE-29)
+
+Как вызов инструмента, решённый внутри `apps/api` (Docker), доходит до `apps/executor` (отдельный
+Windows-процесс на рабочем столе пользователя, вне Docker) и как возвращается результат. OVE-29 —
+дизайн-тикет: решение записано здесь, а исполняемый артефакт у него один — **контракт сообщений**
+(`libs/schemas/executor.py`) плюс **порт** `ExecutorClient` с фейком (`libs/executor/`). Ни
+Redis-стороны клиента, ни цикла приёма в executor этот тикет не пишет — это следующая задача, и она
+обязана следовать тому, что описано ниже.
+
+### Что проверено перед решением
+
+| Что | Как проверено | Результат |
+|---|---|---|
+| адрес, на котором опубликован Redis | `docker/docker-compose.yml` (`"${REDIS_PORT:-56379}:6379"`, без IP), затем `docker port overseer-redis` и `lsof` на поднятом контейнере | **`0.0.0.0:56379` и `[::]:56379`** — все интерфейсы хоста, не `127.0.0.1` |
+| пароль и защищённый режим Redis | `redis-cli CONFIG GET requirepass / protected-mode / bind`, `ACL LIST` внутри контейнера | `requirepass` пуст, `protected-mode no`, `bind * -::*`, `user default on nopass … +@all` |
+| доступен ли Redis из сети | `PING` через `nc` на LAN-адрес машины разработчика, порт 56379 | **`+PONG` без аутентификации** |
+| почему так | документация Docker (port publishing): «By default, when a container's ports are mapped without any specific host address, the Docker daemon publishes ports to all host addresses (`0.0.0.0` and `[::]`)» и «Publishing container ports is insecure by default»; Docker Hub, образ `redis`, раздел Security: «the "Protected mode" is turned off by default … it will be open without a password to anyone» | поведение — дефолт Docker плюс дефолт образа, а не ошибка в нашем compose-файле, но compose его не исправляет |
+| как `apps/api` и процесс на хосте видят Redis | compose: `api` получает `REDIS_URL: redis://redis:6379/0` (имя сервиса во внутренней сети); `.env.example`: `REDIS_URL=redis://localhost:56379/0` (опубликованный порт хоста) | у executor — **свой** адрес через опубликованный порт, см. «Настройки executor» |
+| доставка pub/sub | redis.io, Pub/Sub, Delivery semantics: «Redis' Pub/Sub exhibits at-most-once message delivery semantics … If the subscriber is unable to handle the message … the message is forever lost» | подписчик, которого нет, сообщение теряет молча, а отправитель об этом не узнаёт |
+| списки | redis.io, `BLMOVE`/`LMOVE` (с 6.2.0), раздел «Pattern: Reliable queue» | блокирующее чтение списка и паттерн «processing list» для at-least-once существуют; нам нужен обратный, at-most-once, вариант — см. ниже |
+| Arq | PyPI `arq` (0.28.0 от 16.04.2026), README, `arq/worker.py` на `main`, документация «Jobs may be called more than once!» | классификаторы ОС — только `POSIX :: Linux` и `Unix`, Windows не заявлен; README: «In maintenance only mode»; `add_signal_handler` обёрнут в `except NotImplementedError` (то есть на Windows воркер стартует, но без обработки SIGINT/SIGTERM); исполнение «пессимистичное» — задача, прерванная остановкой воркера, запускается снова; повторы отключаются `max_tries=1` или `retry_jobs=False` |
+| сторона executor | `apps/executor/excel/controller.py`, `sta.py`, `libs/core/exceptions.py` | `CALL_TIMEOUT_S = 60`, `OfficeTimeoutError` значит «результат неизвестен», один STA-поток — вызовы строго последовательны |
+| сторона api | `apps/api/services/chat.py` | `_execute()` зовёт `tool.execute()` внутри открытой транзакции хода: всё время ожидания executor ход держит соединение с PostgreSQL |
+
+Чего проверить не удалось (Windows в окружении разработки нет): что Windows-процесс достучится до
+порта, опубликованного Docker Desktop, по `127.0.0.1`; поведение `redis-py` на Windows-цикле событий
+(`ProactorEventLoop`); точный синтаксис ACL-селекторов Redis 7 из раздела «Безопасность» — его
+сверяет тикет реализации на живом Redis 7.4.
+
+### Варианты
+
+| Критерий | (a) pub/sub + канал ответа | **(b) список-очередь + ключ ответа + heartbeat** | (c) отдельная очередь Arq | (d) HTTP-сервер в executor |
+|---|---|---|---|---|
+| executor не запущен | не видно: `PUBLISH` вернёт 0 подписчиков, но 0 бывает и на гонке переподписки — нужен отдельный механизм живости | ключ heartbeat с TTL: нет ключа — нет executor, ответ за одно `GET` | живость воркера отдельно не выражена: задача просто ляжет в очередь и будет ждать | отказ в соединении — мгновенно |
+| потеря при перезапуске стороны | сообщение без подписчика теряется молча | запрос лежит в списке; executor на старте видит истёкший `deadline` и отказывает | задача переживёт перезапуск и **исполнится позже** — против нашей семантики | запрос в полёте теряется, исход неизвестен |
+| подтверждение и результат | нет ack; ответ теряется, если api переподписался | `accepted` и результат в персональном списке `reply:<id>`, `BLPOP` с таймаутом; «не взят» доказуемо через `LREM` | `job.result(timeout)` | синхронный ответ |
+| порядок | порядок публикации | FIFO одного списка, один потребитель | очередь Arq | на усмотрение сервера |
+| Windows | `redis-py` — чистый Python | то же | официально не заявлен, обработка сигналов отключена | нужен HTTP-сервер и правило брандмауэра Windows |
+| новых движущихся частей | канал + отдельный heartbeat | четыре ключа, без новых зависимостей | вторая очередь и второй воркер Arq, библиотека в режиме «только поддержка» | HTTP-сервер, его аутентификация, адрес executor в конфиге api |
+| безопасность | всё держится на доступе к Redis | всё держится на доступе к Redis — закрывается ACL и привязкой к loopback | то же, плюс произвольные имена функций в задачах | **входящий порт на машине пользователя** — новая поверхность атаки, нужен свой токен и TLS |
+
+**Выбран (b).** Pub/sub проигрывает ровно там, где ожидалось: без хранения, без ack, и отличить
+«executor лежит» от «executor медлит» нельзя, не изобретая рядом живость, — то есть (b) всё равно
+пришлось бы строить, только поверх менее надёжного канала. Arq отпадает по двум независимым причинам:
+Windows официально не поддерживается, а модель «лучше дважды, чем ни разу» прямо противоречит
+необходимой нам at-most-once (её можно выключить, но тогда от Arq остаётся сериализация задачи —
+то, что контракт ниже делает и так). HTTP даёт лучшую живость, но платит за неё входящим портом на
+рабочем столе пользователя — ровно тем, чего «executor сам инициирует соединение» и позволял
+избежать; Redis уже есть у обеих сторон. Redis Streams рассмотрены как вариант (b): группы
+потребителей дают at-least-once и PEL, а at-most-once на них — это `XREADGROUP` с `NOACK` и
+обрезка потока, то есть больше состояния без выигрыша против списка.
+
+### Ключи и поток вызова
+
+| Ключ | Тип | Пишет | Читает | Жизнь |
+|---|---|---|---|---|
+| `overseer:executor:requests` | список | api, `RPUSH` | executor, `BLPOP` | до прочтения; сам элемент несёт `deadline` |
+| `overseer:executor:reply:<id>` | список | executor, `RPUSH` + `EXPIRE` | api, `BLPOP` | `reply_ttl_s` (60 с) |
+| `overseer:executor:heartbeat` | строка, `ExecutorHeartbeat` в JSON | executor, `SET … EX` | api, `GET` | `heartbeat_ttl_s` (15 с), обновляется каждые 5 с |
+| `overseer:executor:seen:<id>` | строка | executor, `SET NX EX` | executor | `dedup_ttl_s` (600 с) |
+
+Сторона **api** (реализация `ExecutorClient.call()`):
+
+1. `GET heartbeat`. Нет ключа — `executor_unavailable`; версия не та — `unsupported_version`;
+   операции нет в `heartbeat.operations` — `unknown_operation`; Redis не отвечает —
+   `transport_unavailable`. Всё это **до отправки**: исход «не выполнено» достоверен.
+   `instance_id` из heartbeat запоминается.
+2. `encode_request()` (потолок `MAX_REQUEST_BYTES`), `RPUSH requests <payload>`. Строка `payload`
+   сохраняется — она нужна для `LREM`.
+3. `BLPOP reply:<id>` с таймаутом `DEFAULT_PICKUP_TIMEOUT_S` (5 с). Ничего — `LREM requests 1
+   <payload>`: удалил `1` — запрос не взят, и взять его теперь некому (`LREM` и `BLPOP` атомарны
+   относительно друг друга) → `not_picked_up`, «не выполнено» достоверно. Удалил `0` — executor
+   его уже забрал, ждём дальше.
+4. Ожидание результата идёт **срезами** не длиннее пяти секунд до `deadline`. После каждого пустого
+   среза — повторный `GET heartbeat`: ключ пропал или `instance_id` сменился (executor упал или
+   перезапустился) — ждать нечего → `reply_timeout`, исход неизвестен.
+5. Пришёл `result` → `parse_reply()` → ответ. Не разобрался — `malformed_reply`.
+6. `deadline` наступил — `reply_timeout`. После `accepted` запрос **не** снимается: он уже исполняется.
+7. Ход отменили (`CancelledError`) после `RPUSH` — экранированный `LREM` как в шаге 3, исход в лог,
+   `CancelledError` пробрасывается.
+
+Сторона **executor** (цикл приёма):
+
+1. На старте `SET heartbeat <своё> NX EX`. Ключ уже есть с чужим `instance_id` — второй executor на
+   том же Redis: процесс **отказывается стартовать** (`ConfigurationError`). Дальше обновление
+   heartbeat только при совпадении `instance_id` (сравнение и запись — одним Lua-скриптом, тем же
+   приёмом, что `_CLAIM_SCRIPT` в `libs/confirmations/store.py`).
+2. `BLPOP requests` → `parse_request()`. Ошибка контракта с разобранным `id` — ответ с кодом в
+   `reply:<id>`; без `id` — только лог, отвечать некуда.
+3. `SET seen:<id> NX EX` не прошёл — дубликат: **без исполнения и без ответа**, `warning`.
+4. Своё «сейчас» ≥ `deadline` — ответ `deadline_exceeded`, без исполнения.
+5. `RPUSH reply:<id> accepted`.
+6. Проверка путей по политике executor (ниже) — `path_not_allowed`.
+7. Вызов контроллера. `OfficeError` → `error_code_for()`; любое другое исключение →
+   `internal_error`, полный трейсбек — в локальный лог executor.
+8. `encode_reply()` (потолок `MAX_REPLY_BYTES`; не влезло — `internal_error`), `RPUSH` + `EXPIRE`.
+
+**Порядок** — FIFO одного списка и одного потребителя, исполнение строго последовательное (STA-поток
+один). Вызовы одного хода `ChatService` и так идут друг за другом; конкурируют только разные
+разговоры, и для них очередь — честный порядок поступления.
+
+**`conversation_id` на проводе не для красоты.** У `ExcelController` есть состояние — «какая книга
+открыта», — и два разговора, делящие один контроллер, писали бы в книги друг друга. Executor поэтому
+выбирает контроллер по `conversation_id` (контроллер на разговор, с закрытием по простою и потолком —
+тем же приёмом, что `BrowserSessionManager`). Детали жизненного цикла — тикет реализации.
+
+### Живость: отказ за миллисекунды, а не за таймаут
+
+Запуск `apps/api` от executor **не зависит**: клиент не ходит в Redis на старте, отказ случается на
+вызове и приходит модели обычным `ToolResult` — то же решение, что у необязательного Playwright.
+Сколько ход держит соединение с PostgreSQL в каждом случае:
+
+| Ситуация | Сколько ждёт api | Исход |
+|---|---|---|
+| executor не запущен (heartbeat истёк) | одно `GET`, миллисекунды | `executor_unavailable`, не выполнено |
+| executor упал меньше 15 с назад (heartbeat ещё жив) | пикап 5 с, затем `LREM` | `not_picked_up`, не выполнено |
+| executor занят другим вызовом | пикап 5 с, затем `LREM` | `not_picked_up`, не выполнено |
+| executor упал посреди вызова | до среза (5 с) + TTL heartbeat (15 с) ≈ 20 с | `reply_timeout`, неизвестно |
+| executor жив, COM завис | до `deadline` (70 с); обычно раньше приходит `timeout` контроллера на 60 с | `timeout` / `reply_timeout`, неизвестно |
+
+`DEFAULT_CALL_BUDGET_S = 70` выбран больше `CALL_TIMEOUT_S = 60` контроллера, чтобы типизированный
+`timeout` от executor приходил раньше, чем api сдастся сам, а пикап в 5 с гарантирует, что
+взятому запросу остаётся не меньше 65 с. Последний ряд — единственный случай, когда соединение
+держится долго, и это тот же принятый риск, что у LLM-вызова (см. «Удержание DB-соединения» в
+[architecture.md](architecture.md)): executor жив, просто Excel медленный.
+
+**Часы.** `deadline` абсолютный, и executor сверяет его со своими часами. В v1 обе стороны на одной
+машине (Docker Desktop и рабочий стол), поэтому расхождение мало. Если часы executor убегут вперёд
+больше бюджета, все вызовы будут честно отклоняться как `deadline_exceeded` — громко, а не молча.
+`heartbeat.sent_at` позволяет api писать `warning` при расхождении больше интервала heartbeat.
+
+### Семантика доставки: at-most-once
+
+Вызов COM, истёкший по таймауту, мог выполниться (см. «Таймаут вызова и остановка»), а значит
+автоматический повтор — это возможная двойная запись или двойное сохранение. Поэтому:
+
+- **api не повторяет никогда.** Ни клиент, ни инструмент над ним. Решение о повторе принимает модель,
+  прочитав, что исход неизвестен, — и если инструмент помечен `requires_confirmation`, повтор снова
+  пройдёт через подтверждение пользователя.
+- **executor не перечитывает взятое.** `BLPOP`, а не `BLMOVE` в processing-список: паттерн «Reliable
+  queue» из документации Redis — это at-least-once, ровно то, от чего мы уходим. Executor, упавший
+  посреди вызова, запрос теряет, и api сообщит «исход неизвестен».
+- **дедупликация по `id`** — `SET seen:<id> NX EX dedup_ttl_s`. Дубликат не исполняется и не получает
+  ответа (ответ ушёл бы в `reply:<id>` оригинала). `dedup_ttl_s` (600 с) больше
+  `MAX_CALL_WINDOW_S` (120 с): запрос, повторённый после истечения дедупликации, к тому моменту уже
+  просрочен и будет отклонён по `deadline`. Повтор отклоняется либо как дубликат, либо как
+  просроченный — третьего не дано.
+
+Что видит модель, когда исход неизвестен: одну фиксированную фразу `UNKNOWN_OUTCOME_TEXT`
+(«выполнилось ли, неизвестно; не повторяй автоматически; скажи пользователю проверить») и
+`summary` «Результат действия на компьютере пользователя неизвестен». Ни текста COM, ни HRESULT, ни
+пути — тем же правилом, что у OVE-20 и OVE-41: подробности остаются в логе executor на машине
+пользователя.
+
+### Безопасность: канал запросов — граница доверия
+
+Кто может записать в `overseer:executor:requests`, тот заставляет процесс на рабочем столе
+пользователя открывать, писать и сохранять файлы. Сейчас это **любой в локальной сети**: Redis
+опубликован на всех интерфейсах без пароля (см. проверку выше). В этом тикете compose не меняется —
+это отдельная находка, и она **блокирует реализацию транспорта**: ни один запрос в executor не должен
+ходить по Redis, пока она не закрыта.
+
+Требования, которые тикет реализации обязан выполнить:
+
+1. **Привязка.** Порт Redis публикуется только на loopback: `127.0.0.1:${REDIS_PORT}:6379` (по
+   документации Docker это ограничивает доступ самим хостом). v1 поддерживает ровно один сценарий —
+   Docker и executor на одной машине. Executor на другой машине требует TLS Redis и отдельного
+   решения; молча открывать порт наружу нельзя.
+2. **Аутентификация.** Отдельные ACL-пользователи Redis (Redis 6+): `overseer-api` и
+   `overseer-executor`. Пользователь executor ограничен ключами `overseer:executor:*` и только теми
+   командами, что нужны циклу приёма; писать в `requests` он не должен (это делается ACL-селекторами
+   Redis 7 — синтаксис сверяется на живом Redis в тикете реализации). Минимум, если ACL откладывается,
+   — `requirepass`. Секреты — в `.env`, не в репозитории.
+3. **Allowlist операций.** Операция — это литерал дискриминированного объединения
+   (`excel.open_or_create_workbook`, `excel.write_range`, `excel.save`), а не имя метода: executor
+   разбирает запрос `parse_request()` и диспетчеризует по **типу модели** (`match`), а не через
+   `getattr` по строке. Неизвестное имя — `unknown_operation`, лишнее поле на любом уровне —
+   `malformed_request`. Произвольных callables, модулей, команд шелла на проводе нет и быть не может.
+4. **Двойная валидация аргументов.** Контракт ограничивает только размер и типы (длины строк, число
+   ячеек, `NaN`, строгие типы без приведения `"1"` → `1`). Содержательная проверка — та же
+   `validation.py` контроллера (A1, имя листа, форма данных, формат пути); провод её не заменяет.
+5. **Политика путей на стороне executor** — после `validate_workbook_path()` и до первого
+   COM-вызова: путь приводится к абсолютному (`realpath`, то есть с раскрытием ссылок и junction'ов) и
+   обязан лежать внутри одного из `EXECUTOR_ALLOWED_ROOTS`; отклоняются UNC (`\\server\share` — это
+   ещё и утечка NTLM-хэша по SMB), device-пути (`\\?\`, `\\.\`), пути относительно диска и компоненты
+   `..`. Отказ — `path_not_allowed`.
+6. **Что executor отклоняет, даже если просят:** операции вне allowlist; неизвестную версию схемы;
+   запрос больше `MAX_REQUEST_BYTES`; истёкший `deadline`; повторный `id`; путь вне разрешённых
+   корней; работу при втором экземпляре executor на том же Redis.
+7. **В ответе только коды.** `ExecutorError` — одно поле `code`; ответ с добавленным `message`
+   отклоняется на разборе (`extra="forbid"`), так что сырой текст COM не просочится и случайно.
+
+Подтверждение необратимых действий (`requires_confirmation`) остаётся на стороне api: executor не
+может проверить, что пользователь сказал «да», и доверяет тому, кто имеет право писать в очередь.
+Ровно поэтому пункты 1–2 — обязательные, а не «гигиена».
+
+Подпись запросов HMAC общим секретом рассмотрена и в v1 отклонена: в нашем деплое право записи в
+очередь и знание секрета совпали бы у одних и тех же процессов, а реальная дыра — неаутентифицированный
+Redis — закрывается пунктами 1–2. Пересмотреть, если Redis станет общим за пределами одной машины.
+
+### Контракт сообщений `libs/schemas/executor.py`
+
+Pydantic v2, `extra="forbid"` везде, типизированные дискриминаторы — в духе `libs/schemas/ws.py`.
+Версия схемы — `SCHEMA_VERSION = 1`, на проводе обязательное поле `schema_version`.
+
+**Запрос** — объединение по `operation`, общая часть у всех вариантов:
+
+```json
+{
+  "schema_version": 1,
+  "id": "6f1c…",
+  "conversation_id": "a2e9…",
+  "issued_at": "2026-11-22T12:00:00Z",
+  "deadline": "2026-11-22T12:01:10Z",
+  "operation": "excel.write_range",
+  "arguments": {"sheet": "Лист1", "start_cell": "A1", "data": [["Итого", 42]], "formulas": false}
+}
+```
+
+| Модель | `arguments` |
+|---|---|
+| `OpenOrCreateWorkbookRequest` | `path: str \| None` |
+| `WriteRangeRequest` | `sheet`, `start_cell`, `data: list[list[bool \| int \| float \| str \| None]]`, `formulas: bool = false` |
+| `SaveWorkbookRequest` | `path: str \| None`, `overwrite: bool = false` |
+
+Время — только с часовым поясом (`AwareDatetime`); `deadline` позже `issued_at` и не дальше
+`MAX_CALL_WINDOW_S` (120 с) от него.
+
+**Ответы** — объединение по `type`, оба в `reply:<id>`:
+
+```json
+{"type": "accepted", "schema_version": 1, "id": "6f1c…"}
+{"type": "result", "schema_version": 1, "id": "6f1c…", "status": "ok",
+ "data": {"sheet": "Лист1", "address": "A1:B1", "rows": 1, "columns": 2, "sheet_created": false}}
+{"type": "result", "schema_version": 1, "id": "6f1c…", "status": "error", "data": {},
+ "error": {"code": "file_locked"}}
+```
+
+`data` успешного ответа описан моделями `WorkbookOpened`, `RangeWritten`, `WorkbookSaved` — поля
+совпадают с `WorkbookInfo` / `WriteResult` / `SaveResult` контроллера (пришпилено тестом).
+
+**Heartbeat** — `ExecutorHeartbeat`: `schema_version`, `instance_id`, `started_at`, `sent_at`,
+`operations` (что этот executor умеет; api отказывает `unknown_operation` до отправки).
+
+**Потолки** (байты считаются в UTF-8, проверяются **до** разбора JSON): запрос — `MAX_REQUEST_BYTES`
+(1 МиБ), ответ — `MAX_REPLY_BYTES` (64 КиБ), heartbeat — 4 КиБ. На отправке те же потолки
+проверяют `encode_request()` / `encode_reply()`: api не может отправить, а executor — ответить
+сообщением сверх лимита. Ячеек — не больше `MAX_CELLS` (10 000, равно `MAX_WRITE_CELLS`
+контроллера), текст ячейки — не длиннее 32 767 символов, имя листа — 31, путь — 260 (Windows
+`MAX_PATH`; контроллер строже, 218).
+
+**Версия проверяется первой, до формы.** `parse_request()` читает сырой `schema_version` раньше
+валидации: целое, но не `1` — `unsupported_version` (а не «лишнее поле», которое выдала бы модель на
+запросе новой версии); не целое (в том числе `true`, `1.0`, `"1"`) — `malformed_request`. Модели и
+сами не принимают `true` за `1` — pydantic по умолчанию принял бы. Для heartbeat то же правило: новая
+версия executor с новыми полями опознаётся как несовпадение версий, а не как мусор.
+
+**Ошибки разбора** — `ExecutorContractError(code, request_id, errors)`: код из того же
+`ExecutorErrorCode`, `id`, если его удалось извлечь, и **типы** ошибок pydantic (`extra_forbidden`,
+`missing`) для лога — без значений, тем же правилом, что `tool.invalid_arguments`. Исключение
+наследует `ValueError`, а не `OverseerError`: это результат разбора, как `ValidationError`, и ловят
+его ровно две точки — цикл приёма executor и клиент api.
+
+**Коды ошибок и исходы** — `ExecutorErrorCode` и `ERROR_OUTCOMES`: у каждого кода один из двух
+исходов, `not_executed` (достоверно не выполнено, можно чинить и повторять) или `unknown`.
+Исключения `Office*` переводит `error_code_for()` (по MRO, так что подкласс наследует код родителя):
+
+| Исключение | Код | Исход |
+|---|---|---|
+| `OfficeInputError` | `invalid_input` | не выполнено |
+| `OfficeFileExistsError` | `file_exists` | не выполнено |
+| `OfficeUnsavedChangesError` | `unsaved_changes` | не выполнено |
+| `OfficeNotInstalledError` | `not_installed` | не выполнено |
+| `OfficeBusyError` | `busy` | не выполнено |
+| `OfficeFileLockedError` | `file_locked` | не выполнено |
+| `OfficeTimeoutError` | `timeout` | **неизвестно** |
+| `OfficeComError`, `OfficeError` | `com_error` | **неизвестно** — 0x800A03EC универсален, и сбой посреди записи не доказывает, что записи не было |
+
+### Порт `ExecutorClient` (`libs/executor/`)
+
+```python
+class ExecutorClient(Protocol):
+    async def call(self, request: ExecutorRequest) -> ExecutorResponse: ...
+```
+
+Контракт порта: **тотальный**, как `Tool.execute()`. Сбои транспорта не бросаются, а возвращаются
+`ExecutorResponse.failed(request.id, <код>)` с кодами стороны api (`executor_unavailable`,
+`transport_unavailable`, `not_picked_up`, `reply_timeout`, `malformed_reply`, `transport_error`,
+`payload_too_large`, `unsupported_version`, `unknown_operation`); насквозь проходит только
+`CancelledError`. Так у инструмента одна ветка разбора на любой исход.
+
+Удалённый инструмент (OVE-31/32/42) — обычный наследник `Tool`, который в `_execute` собирает
+запрос, зовёт порт и переводит ответ:
+
+```python
+response = await self._client.call(request)
+if response.error is not None:
+    return failure_result(response.error)
+written = RangeWritten.model_validate(response.data)
+return ToolResult.ok(...)
+```
+
+`failure_result()` берёт фиксированный текст из `FAILURE_TEXTS` (по одному на код, ни одной
+подстановки) и короткий `summary` по исходу — «не выполнено» или «результат неизвестен». Тексты
+общие, чтобы три инструмента не формулировали одно и то же трижды по-разному.
+
+`FakeExecutorClient` (`libs/executor/fake.py`) — фейк для тестов инструментов. Он не подменяет
+контракт, а **проходит его**: запрос кодируется и разбирается заново (потолки и `extra="forbid"`
+работают как на настоящем проводе), ответ — тоже. Поведение повторяет описанное выше:
+`running=False` → `executor_unavailable` без вызова обработчика; `failure="<код>"` — сценарий сбоя
+транспорта; повторный `id` → обработчик не зовётся, исход `reply_timeout`; часы (`clock`) позже
+`deadline` → `deadline_exceeded`; `OfficeError` из обработчика → его код; другое исключение →
+`internal_error` без текста; ответ с чужим `id` не доставляется (`reply_timeout`); слишком большой
+ответ → `malformed_reply`. Записанные запросы — в `requests`.
+
+### Матрица отказов
+
+| Ситуация | Что делает api | Код | Что говорят модели | Что в логах |
+|---|---|---|---|---|
+| executor не запущен | `GET heartbeat` → нет ключа, в очередь ничего не кладётся | `executor_unavailable` | executor не запущен, действие не выполнено, попроси пользователя его запустить | api: `executor.unavailable` |
+| Redis недоступен из api | исключение `redis-py` до `RPUSH` | `transport_unavailable` | канал недоступен, не выполнено | api: `executor.transport_unavailable` с типом исключения |
+| Redis оборвался после `RPUSH` | ждать нечего | `transport_error` | исход неизвестен, не повторяй | api: `executor.transport_error` |
+| executor занят или только что упал | 5 с пикапа, `LREM` снял запрос | `not_picked_up` | занят, не выполнено, можно позже | api: `executor.not_picked_up` |
+| executor упал или перезапустился посреди вызова | heartbeat пропал или сменил `instance_id` | `reply_timeout` | исход неизвестен | api: `executor.reply_timeout`, `reason=executor_lost` |
+| `deadline` истёк на стороне api | перестаёт ждать | `reply_timeout` | исход неизвестен | api: `executor.reply_timeout`, `reason=deadline` |
+| запрос пролежал в очереди дольше `deadline` | — (api уже ушёл) | `deadline_exceeded` | — (некому) | executor: `executor.deadline_exceeded` |
+| executor не разобрал запрос | получает ответ-ошибку | `malformed_request` / `payload_too_large` | запрос некорректной формы, не выполнено — это ошибка сервера, а не модели | executor: `executor.request_rejected` с типами ошибок; api: `executor.call_finished` |
+| ответ executor не разобрался | — | `malformed_reply` | исход неизвестен | api: `executor.malformed_reply` с типами ошибок |
+| версии схемы не совпали | по heartbeat — до отправки; по запросу — ответ executor | `unsupported_version` | executor нужно обновить, не выполнено | api: `executor.version_mismatch` с обеими версиями |
+| операция неизвестна executor | по `heartbeat.operations` — до отправки | `unknown_operation` | executor нужно обновить, не выполнено | api: `executor.unknown_operation` |
+| путь вне разрешённых корней | получает ответ-ошибку | `path_not_allowed` | путь вне разрешённых папок, не выполнено | executor: `executor.path_not_allowed` (без пути) |
+| типизированная ошибка Office | получает ответ-ошибку | `invalid_input`, `file_exists`, `unsaved_changes`, `not_installed`, `busy`, `file_locked` | фиксированная фраза на код, не выполнено | executor: `office.com_error` (OVE-41, с HRESULT и описанием — локально) |
+| Excel не ответил за 60 с | получает ответ-ошибку | `timeout` | исход неизвестен | executor: `office.com_error` / таймаут контроллера |
+| непредвиденный COM-сбой | получает ответ-ошибку | `com_error` | исход неизвестен | executor: `office.com_error` с трейсбеком |
+| непредвиденное исключение в executor | получает ответ-ошибку | `internal_error` | исход неизвестен | executor: `executor.call_failed` с трейсбеком |
+| повторный `id` | — (ответа нет, api получит `reply_timeout`) | — | — | executor: `executor.duplicate_request` |
+
+Во всех строках в логи уходят `request_id`, `conversation_id`, операция, код, исход и длительность —
+**никогда** аргументы, пути и данные ячеек: это данные пользователя, их место — аудит вызовов.
+Итоговое событие каждого вызова на api — `executor.call_finished`.
+
+### Настройки executor (контракт, кода нет)
+
+Свой класс, как `VoiceSettings`: `ExecutorSettings` в `apps/executor/config.py`, `env_prefix="EXECUTOR_"`,
+тот же `.env`. Общий `Settings` не переиспользуется: executor едет на машину пользователя, а поля
+БД и LLM ему не нужны.
+
+| Поле | Тип | Дефолт | Назначение |
+|---|---|---|---|
+| `redis_url` | `str` | `redis://127.0.0.1:56379/0` | **опубликованный порт хоста**, а не `redis://redis:6379` из compose: имя сервиса существует только во внутренней сети Docker. С ACL — `redis://overseer-executor:<пароль>@127.0.0.1:56379/0` |
+| `heartbeat_interval_s` | `float` | `5.0` | как часто обновлять heartbeat |
+| `heartbeat_ttl_s` | `float` | `15.0` | TTL heartbeat; валидатор: не меньше двух интервалов |
+| `reply_ttl_s` | `float` | `60.0` | сколько ответ ждёт в `reply:<id>`, если api уже ушёл |
+| `dedup_ttl_s` | `float` | `600.0` | валидатор: больше `MAX_CALL_WINDOW_S` |
+| `allowed_roots` | `list[Path]` | «Документы» и «Рабочий стол» текущего пользователя | корни, вне которых пути отклоняются |
+| `max_controllers` | `int` | `2` | потолок одновременных контроллеров (каждый — свой экземпляр Excel) |
+| `log_level` | `str` | `"INFO"` | |
+
+На стороне api (поля `Settings` и ключи `.env.example` — тем же коммитом, что их первая
+реализация): `executor_pickup_timeout_s` (5) и `executor_call_budget_s` (70); дефолты уже стоят
+константами `DEFAULT_PICKUP_TIMEOUT_S` и `DEFAULT_CALL_BUDGET_S` в `libs/executor/client.py`.
+`.env.example` этим тикетом не трогается: ни одного поля ещё нет.
+
+**v1 поддерживает ровно один executor на один Redis.** Ключи без идентификатора машины, поэтому два
+executor на одном Redis означали бы: оба читают одну очередь, и запрос пользователя А исполняется на
+рабочем столе пользователя Б; heartbeat перезаписывают оба, и живой второй маскирует мёртвый первый;
+`LREM` и дедупликация продолжают работать, но уже не про того адресата. Поэтому второй экземпляр
+обязан отказаться стартовать (шаг 1 цикла приёма). Несколько машин — это адресация
+(`requests:<executor_id>`, выбор executor по разговору или пользователю) и отдельный тикет.
+
+### Что проверено и что нет
+
+**Проверено:** привязка и аутентификация Redis на поднятом контейнере (таблица в начале раздела);
+документация Docker, образа `redis`, Redis pub/sub, `BLMOVE`/`LMOVE`, Arq — с цитатами выше; весь
+контракт — юнит-тестами (`tests/unit/test_executor_contract.py`: круговой путь, выбор модели по
+операции, allowlist, лишние поля на каждом уровне, неверные формы, версия до формы, `true` вместо
+версии, потолки в байтах, а не символах, на приёме и на отправке, глубокая вложенность, ответ с
+сырым текстом, исходы всех кодов, соответствие исключениям `Office*` и лимитам контроллера); порт и
+фейк — `tests/unit/test_executor_client.py`, включая удалённый инструмент поверх порта.
+
+**Не проверено:** Windows-сторона целиком (доступ к `127.0.0.1` Docker Desktop, `redis-py` на
+`ProactorEventLoop`, `realpath` с junction'ами); синтаксис ACL-селекторов на живом Redis 7.4;
+последовательность ключей и тайминги — это проект, Redis-стороны ещё нет; задержки на реальной
+машине (5 с пикапа — оценка, а не замер).
+
 ## Что ещё не решено
 
-- транспорт до `api`/`worker` (OVE-29) и, вместе с ним, кто и когда зовёт `start()` / `aclose()`;
+- реализация транспорта по OVE-29: Redis-сторона `ExecutorClient` в api, цикл приёма, heartbeat и
+  `ExecutorSettings` в executor, контроллер на разговор — и вместе с ним, кто и когда зовёт
+  `start()` / `aclose()`; блокируется закрытием Redis (привязка к loopback и ACL);
+- вызов executor из `apps/worker` — в v1 клиент только у api;
 - инструменты Excel над контроллером (схемы аргументов, `requires_confirmation` для
   `overwrite=True` и `save()` поверх чужого файла);
 - контроллер Word (OVE-30/33) — берёт `com.py`, `sta.py` и исключения `Office*` без правок.
