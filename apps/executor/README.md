@@ -50,7 +50,8 @@ uv run pytest -m windows
 инициирует executor.
 
 Контракт сообщений — `libs/schemas/executor.py`, порт клиента и фейк — `libs/executor/`. Цикла
-приёма и `ExecutorSettings` ещё нет. До их реализации Redis обязан быть закрыт: сейчас compose
-публикует его на всех интерфейсах без пароля. Решение целиком — в
+приёма и `ExecutorSettings` ещё нет. Redis для них уже закрыт (OVE-59): compose публикует его
+только на `127.0.0.1` и требует пароль `REDIS_PASSWORD`; ACL-пользователей ещё нет. Решение
+целиком — в
 [.claude/knowledge/architecture-executor.md](../../.claude/knowledge/architecture-executor.md),
 раздел «Транспорт `apps/api` ↔ `apps/executor`».

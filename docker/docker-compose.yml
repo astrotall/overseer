@@ -9,8 +9,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-overseer}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-overseer}
       POSTGRES_DB: ${POSTGRES_DB:-overseer}
+    # Порты инфраструктуры публикуются только на loopback хоста: без IP Docker
+    # открывает их на всех интерфейсах, то есть всей локальной сети (OVE-59).
     ports:
-      - "${POSTGRES_PORT:-55432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -24,13 +26,25 @@ services:
     image: redis:7-alpine
     container_name: overseer-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    # Пароль обязателен (OVE-59). requirepass передаётся конфигом через stdin
+    # («redis-server -»), а не аргументом: аргументы процесса видны в ps хоста.
+    # exec docker-entrypoint.sh сохраняет штатный сброс прав до пользователя redis.
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-overseer}
+    command:
+      - sh
+      - -c
+      - |
+        exec docker-entrypoint.sh redis-server - --appendonly yes <<EOF
+        requirepass $$REDIS_PASSWORD
+        EOF
     ports:
-      - "${REDIS_PORT:-56379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-56379}:6379"
     volumes:
       - redisdata:/data
+    # redis-cli выходит с кодом 0 и на NOAUTH, поэтому проверяется сам ответ PONG.
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -qx PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -53,7 +67,7 @@ services:
         required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-overseer}:${POSTGRES_PASSWORD:-overseer}@postgres:5432/${POSTGRES_DB:-overseer}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://default:${REDIS_PASSWORD:-overseer}@redis:6379/0
       ENV: ${ENV:-local}
     ports:
       - "${API_PORT:-8000}:8000"
@@ -80,7 +94,7 @@ services:
         required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-overseer}:${POSTGRES_PASSWORD:-overseer}@postgres:5432/${POSTGRES_DB:-overseer}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://default:${REDIS_PASSWORD:-overseer}@redis:6379/0
       ENV: ${ENV:-local}
     depends_on:
       postgres:

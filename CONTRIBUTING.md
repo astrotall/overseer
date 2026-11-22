@@ -77,7 +77,7 @@ ci: run alembic upgrade head on PRs
 ### Области
 
 По приложению из `apps/`: `api`, `worker`, `executor`, `voice`.
-По библиотеке из `libs/`: `db`, `llm`, `tools`, `schemas`, `core`.
+По библиотеке из `libs/`: `db`, `llm`, `tools`, `schemas`, `core`, `browser`, `confirmations`; `libs/executor` (порт клиента до executor) идёт под той же областью `executor`, что и приложение.
 Общее: `deps`, `ci`, `docs`.
 
 Область необязательна, если правка не привязана к одному месту.
@@ -128,12 +128,12 @@ feat(tools): add "write_document" tool spec (OVE-42)
 
 Есть пары файлов, которые расходятся молча — и это ловится не тестами, а только в рантайме. Их правим вместе:
 
-- **Новый инструмент для LLM** (function calling) → исполнитель и его описание (`ToolSpec`) — вместе, оба в `libs/tools`: по [architecture.md](.claude/knowledge/architecture.md) реестр инструментов — это «описание для function calling + исполнитель», а `libs/llm/base.py` даёт только *тип* `ToolSpec` (`name`, `description`, `input_schema`) и реэкспортит его из `libs/llm/__init__.py`. Отдельного места регистрации в `libs/llm` нет — класть схему туда не нужно. Плюс документация контракта инструментов, когда она появится (отдельный файл в `.claude/knowledge/` по образцу будущего `api-contract.md` — см. там же, раздел «Что ещё не специфицировано»). Оговорка: `libs/tools` сейчас пуст, реестра ещё нет — его форму фиксирует первая задача, которая заведёт инструмент; до тех пор не выдумывай ни имена инструментов, ни способ регистрации.
-- **Новая или изменённая SQLAlchemy-модель** → сама правка + импорт модели в `libs/db/models/__init__.py` + Alembic-миграция — всё одним коммитом. Импорт обязателен: `alembic/env.py` делает `from libs.db import models` и берёт `models.Base.metadata`, то есть выполняется только `libs/db/models/__init__.py`. Таблица попадает в `Base.metadata` в момент выполнения `class`-определения, поэтому модуль, который никто не импортировал, для `--autogenerate` не существует — он молча сгенерирует пустую миграцию. Без миграции схема БД разъезжается с кодом (в `alembic/versions/` сейчас нет ни одной ревизии — первая модель приносит и первую миграцию).
-- **Новое или переименованное поле `Settings`** (`libs/core/config.py`) → соответствующий ключ в `.env.example` — тем же коммитом. `.env.example` — единственное место, где видно, какие переменные вообще существуют: поле без ключа никто не найдёт, а ключ без поля молча проглотится (`extra="ignore"`). Исключение — `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT`, `REDIS_PORT`: это переменные для docker compose, полей `Settings` под ними нет и быть не должно, правило на них не распространяется.
-- **Изменение зависимостей** (`pyproject.toml`: `[project] dependencies` или `[dependency-groups] dev`) → обновлённый `uv.lock` в том же коммите. `uv add` / `uv remove` / `uv lock` делают это сами — достаточно не забыть застейджить лок. Разошлись — и `uv sync --dev` в CI и в хуках поставит не те версии, которые заявлены в манифесте.
+- **Новый инструмент для LLM** (function calling) → класс-наследник `Tool` в `libs/tools` + его регистрация в `lifespan` (`apps/api/main.py`, рядом с `EchoTool`, `WebSearchTool`, `OpenPageTool`) + раздел в `.claude/knowledge/` — вместе. Исполнитель и описание живут в одном классе: `to_spec()` строит `ToolSpec` из `arguments_model`, так что схема и валидация не расходятся по построению (протокол — «Протокол инструмента `libs/tools/base.py`» в [architecture.md](.claude/knowledge/architecture.md)). Молча расходятся класс и регистрация: незарегистрированный инструмент модель просто никогда не увидит. `libs/llm/base.py` даёт только *тип* `ToolSpec`, отдельного места регистрации в `libs/llm` нет — класть схему туда не нужно. Отдельного файла контракта инструментов пока нет: каждый инструмент описан в своём разделе (`web_search` и `open_page` — в [architecture-browser.md](.claude/knowledge/architecture-browser.md)), а когда инструментов станет больше, контракт уедет в отдельный файл — см. «Что ещё не специфицировано» в architecture.md. Имена и схемы будущих инструментов там же названы незафиксированными — не выдумывай их.
+- **Новая или изменённая SQLAlchemy-модель** → сама правка + импорт модели в `libs/db/models/__init__.py` + Alembic-миграция — всё одним коммитом. Импорт обязателен: `alembic/env.py` делает `from libs.db import models` и берёт `models.Base.metadata`, то есть выполняется только `libs/db/models/__init__.py`. Таблица попадает в `Base.metadata` в момент выполнения `class`-определения, поэтому модуль, который никто не импортировал, для `--autogenerate` не существует — он молча сгенерирует пустую миграцию. Без миграции схема БД разъезжается с кодом.
+- **Новое или переименованное поле `Settings`** (`libs/core/config.py`) → соответствующий ключ в `.env.example` — тем же коммитом. `.env.example` — единственное место, где видно, какие переменные вообще существуют: поле без ключа никто не найдёт, а ключ без поля молча проглотится (`extra="ignore"`). Исключение — `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT`, `REDIS_PASSWORD`, `REDIS_PORT`: это переменные для docker compose, полей `Settings` под ними нет и быть не должно, правило на них не распространяется.
+- **Изменение зависимостей** (`pyproject.toml`: `[project] dependencies` или любая группа в `[dependency-groups]` — `dev`, `browser`, `voice`, `executor`) → обновлённый `uv.lock` в том же коммите. `uv add` / `uv remove` / `uv lock` делают это сами — достаточно не забыть застейджить лок. Разошлись — и `uv sync --dev` в CI и в хуках поставит не те версии, которые заявлены в манифесте.
 - **Новый домен/модуль в `libs/`** → код + контракт границ слоёв. *(TODO: когда добавим import-linter или аналог — до тех пор направление зависимостей `apps/ → libs/` и «`libs/` не импортирует `apps/`» держим руками, см. [architecture.md](.claude/knowledge/architecture.md).)*
-- **Решение по открытому архитектурному вопросу** (разделение `api` / `worker` и будущего `executor`, транспорт до `executor`, формат подтверждения необратимых действий, схема памяти агента) → фиксируется явно: в описании PR, а если решение долгоживущее — отдельным файлом в `.claude/knowledge/`. Не оставляем его только в переписке.
+- **Решение по открытому архитектурному вопросу** (какие вопросы открыты сейчас — раздел «Что ещё не специфицировано» в [architecture.md](.claude/knowledge/architecture.md); например, схема памяти агента или перенос цикла инструментов в `apps/worker`) → фиксируется явно: в описании PR, а если решение долгоживущее — отдельным файлом в `.claude/knowledge/`. Не оставляем его только в переписке.
 
 ## Пул-реквесты
 
@@ -167,7 +167,7 @@ pre-commit install --install-hooks && pre-commit install --hook-type commit-msg 
 
 **Что гоняет `pre-commit`** (быстро, на каждый коммит):
 
-- `ruff check --fix` — линт с автофиксом (набор правил `E`, `F`, `I`, `UP`, `B`, `ASYNC`, `C4`, `SIM` — см. `pyproject.toml`), **по фактически изменённым (staged) `*.py`**;
+- `ruff check --fix` — линт с автофиксом (набор правил — `select` в `[tool.ruff.lint]` в `pyproject.toml`), **по фактически изменённым (staged) `*.py`**;
 - `ruff format` — форматирование, тоже только по staged `*.py`;
 - `mypy apps libs` — типы, strict-конфиг из `pyproject.toml`, **по всему дереву целиком**.
 
@@ -192,6 +192,7 @@ pre-commit install --install-hooks && pre-commit install --hook-type commit-msg 
 
 - **ruff** — `ruff check .` (линт) и `ruff format --check .` (форматирование);
 - **mypy** — `mypy apps libs`, strict-конфиг из `pyproject.toml`;
+- **пароль Redis** — первым шагом на сервис-контейнере Redis включается `requirepass`, и тесты ходят в него с паролем, как и в docker compose (OVE-59);
 - **alembic** — `alembic upgrade head` на чистой PostgreSQL из сервис-контейнера: миграции обязаны накатываться с нуля;
 - **создание тестовой базы** — `psql ... -c 'CREATE DATABASE overseer_test'` на том же сервис-контейнере, между `alembic upgrade head` и тестами: без неё фикстура `db_engine` не поднимется, а под `CI` недоступная база не пропускает тесты, а роняет их;
 - **pytest** — весь набор тестов, с покрытием: `pytest --cov --cov-report=term-missing --cov-report=xml`. Отдельным шагом (`if: always()`) `coverage.xml` уезжает артефактом сборки — порога `fail_under` нет, покрытие тут информация, а не гейт.

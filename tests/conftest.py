@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis.asyncio import Redis, from_url
-from redis.exceptions import RedisError, ResponseError
+from redis.exceptions import AuthenticationError, RedisError, ResponseError
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
@@ -72,6 +72,14 @@ def test_redis_url(settings: Settings) -> str:
     return urlunsplit(parts._replace(path=f"/{test_db}"))
 
 
+def redact_redis_url(url: str) -> str:
+    parts = urlsplit(url)
+    if parts.password is None:
+        return url
+    host = parts.netloc.rpartition("@")[2]
+    return urlunsplit(parts._replace(netloc=f"{parts.username or ''}:***@{host}"))
+
+
 @pytest.fixture(scope="session")
 async def db_engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(test_database_url, poolclass=NullPool, future=True)
@@ -110,19 +118,26 @@ def _raise_if_cluster_mode_select_error(exc: ResponseError, *, redis_url_test: s
 @pytest.fixture(scope="session")
 async def redis_client(test_redis_url: str, settings: Settings) -> AsyncIterator[Redis]:
     client: Redis = from_url(test_redis_url, encoding="utf-8", decode_responses=True)
+    shown_url = redact_redis_url(test_redis_url)
     try:
         await client.ping()
+    except AuthenticationError as exc:
+        await client.aclose()
+        pytest.fail(
+            f"Redis ({shown_url}) отклонил учётные данные ({exc}): Redis требует пароль "
+            "(OVE-59) — сверь REDIS_URL / REDIS_URL_TEST в .env с .env.example и REDIS_PASSWORD"
+        )
     except ResponseError as exc:
         await client.aclose()
         _raise_if_cluster_mode_select_error(exc, redis_url_test=settings.redis_url_test)
         if os.getenv("CI"):
             raise
-        pytest.skip(f"Redis недоступен ({test_redis_url}): {exc}")
+        pytest.skip(f"Redis недоступен ({shown_url}): {exc}")
     except RedisError as exc:
         await client.aclose()
         if os.getenv("CI"):
             raise
-        pytest.skip(f"Redis недоступен ({test_redis_url}): {exc}")
+        pytest.skip(f"Redis недоступен ({shown_url}): {exc}")
 
     yield client
     await client.aclose()

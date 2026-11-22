@@ -49,7 +49,7 @@ Key principles:
 ```
                  ┌───────────────────────────┐
   voice / text   │  Client (UI / CLI / mic)  │
-   ────────────► │  REST + WebSocket stream  │
+   ────────────► │     REST + WebSocket      │
                  └─────────────┬─────────────┘
                                │
                     ┌──────────▼───────────┐        ┌──────────────────┐
@@ -63,7 +63,7 @@ Key principles:
                  ┌──────▼──────┐   ┌──────────────────────────┐
                  │    Redis    │   │        libs/llm          │
                  │  Arq queue  │   │ Anthropic / DeepSeek     │
-                 │   pub/sub   │   │ "brain": picks the tool  │
+                 │executor list│   │ "brain": picks the tool  │
                  └──┬───────┬──┘   └──────────┬───────────────┘
                     │       │                 │
                     │       │                 ▼
@@ -74,7 +74,8 @@ Key principles:
         │ of reasoning │    │        │  invocation        │
         └──────────────┘    │        └─────────┬──────────┘
                             │                  │
-                            │ pub/sub          │ desktop commands
+                            │ list queue,      │ desktop commands
+                            │ heartbeat        │
                             │                  ▼
                   ┌─────────▼──────────────────────────────┐
                   │           apps/executor                │
@@ -86,10 +87,16 @@ Key principles:
 ```
 
 Left to right, the flow is: request → `api` → the LLM decides which tool is
-needed → the tool runs either directly in `worker` (if it is Python code: DB,
-HTTP, files) or goes to `executor` over Redis (if Windows and a live desktop
-are required) → the result is returned to the model → the model formulates the
-answer → the answer is streamed to the client over WebSocket.
+needed → the tool runs either directly in Python (DB, HTTP, files, a headless
+browser) or goes to `executor` over Redis (if Windows and a live desktop are
+required) → the result is returned to the model → the model formulates the
+answer → the answer goes back to the client over REST or WebSocket.
+
+The diagram is the target picture. In v1 the tool-calling loop lives in
+`ChatService` inside `api`, and Python tools run there; `worker` only has the
+`ping` smoke task so far, the `api` ↔ `executor` transport is designed (OVE-29)
+but not implemented, and replies arrive whole — token streaming is not there
+yet.
 
 ## Stack
 
@@ -121,20 +128,24 @@ The monorepo is split into **`apps/`** and **`libs/`**:
 overseer/
 ├── apps/
 │   ├── api/                 # FastAPI: routes, WebSocket, DI dependencies
-│   │   ├── main.py          #   app creation + lifespan (DB, Redis)
-│   │   ├── deps.py          #   SessionDep / RedisDep / SettingsDep
-│   │   └── routes/          #   health.py, ws.py
+│   │   ├── main.py          #   app creation + lifespan (DB, Redis, LLM client,
+│   │   │                    #   tool registry, browser sessions)
+│   │   ├── deps.py          #   SessionDep / RedisDep / ChatServiceDep / ...
+│   │   ├── services/        #   chat.py (ChatService), confirmations.py
+│   │   └── routes/          #   health, conversations, confirmations, ws
 │   ├── worker/              # Arq worker: background and long-running tasks
 │   ├── executor/            # a separate Windows process outside Docker (COM/Playwright);
 │   │                        #   so far only the Excel COM controller, no transport
 │   └── voice/               # a local cross-platform voice client outside Docker,
-│                            #   a /ws/chat client; mic to text and text to speech work,
-│                            #   the socket is pending — see apps/voice/README.md
+│                            #   a /ws/chat client — see apps/voice/README.md
 ├── libs/
 │   ├── core/                # config (pydantic-settings), logging (structlog), exceptions
 │   ├── db/                  # SQLAlchemy Base, async engine/session, Redis, models
-│   ├── llm/                 # Anthropic/DeepSeek clients, tool-calling base (stub)
-│   ├── tools/               # the agent's tool protocol; the registry is not there yet
+│   ├── llm/                 # Anthropic/DeepSeek clients, provider-neutral tool-calling contract
+│   ├── tools/               # the tool protocol, the registry and the tools themselves
+│   ├── browser/             # Playwright session lifecycle, SSRF egress proxy
+│   ├── confirmations/       # pending confirmations of irreversible actions (Redis)
+│   ├── executor/            # the ExecutorClient port to apps/executor and its fake
 │   └── schemas/             # Pydantic v2 DTOs
 ├── alembic/                 # migrations, env.py wired to the async engine and libs.db
 ├── docker/
@@ -195,6 +206,21 @@ uv run arq apps.worker.main.WorkerSettings                # worker (in another t
 > along with them). Inside the docker network the services always talk over the
 > internal `5432` / `6379` — that does not need changing.
 
+> **Access.** Both ports are published on `127.0.0.1` only, so nothing outside this
+> machine can reach PostgreSQL or Redis, and Redis requires a password (`REDIS_PASSWORD`,
+> passed to `api` and `worker` inside their `REDIS_URL`). The host-side URLs use the
+> literal `127.0.0.1` rather than `localhost`, because nothing listens on the IPv6
+> loopback. The defaults — `overseer`/`overseer` for PostgreSQL and `overseer` for Redis —
+> are **local-development values, not secrets**. On any other machine, replace them in
+> `.env` (`POSTGRES_PASSWORD` / `REDIS_PASSWORD`, and the same values in `DATABASE_URL` /
+> `DATABASE_URL_TEST` / `REDIS_URL`). Use URL-safe characters only, e.g.
+> `openssl rand -hex 32`: Arq does not percent-decode a password in the URL. If your
+> `.env` predates the password (`REDIS_URL=redis://localhost:56379/0`), copy the Redis
+> lines from `.env.example`: tests that need Redis fail instead of skipping when Redis
+> rejects the credentials. The decision record is in
+> [.claude/knowledge/architecture.md](.claude/knowledge/architecture.md), section
+> «Доступ к PostgreSQL и Redis».
+
 ### Migrations
 
 ```bash
@@ -219,7 +245,7 @@ uv sync                       # dependencies, including the dev group
 uv run pytest                 # the whole suite
 uv run pytest tests/unit      # unit tests only, no infrastructure required
 uv run pytest -m integration  # integration tests only
-uv run pytest -m browser      # browser lifecycle tests only, on a real Chromium
+uv run pytest -m browser      # browser tests only (lifecycle and browser tools), on a real Chromium
 uv run pytest --cov --cov-report=term-missing   # with coverage
 ```
 
@@ -309,13 +335,14 @@ and the commit message format is checked at the `commit-msg` stage. Details are 
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — on every PR into `main` and on
 every push to `main`, a single job with the `postgres:16` and `redis:7` services:
+enabling the Redis password (the same authenticated path as docker compose) →
 `ruff check` → `ruff format --check` → `mypy` → `alembic upgrade head` on a clean
 database → creation of `overseer_test` → `pytest --cov`. A failure at any step fails the
 job; we do not merge a red CI.
 
 ## Status
 
-**MVP in progress.** Everything currently in the repository is a *skeleton*:
+**MVP in progress.**
 
 - ✅ the FastAPI shell with `GET /health` and a lifespan (opening and closing
   the PostgreSQL and Redis connections);
@@ -324,13 +351,14 @@ job; we do not merge a red CI.
   works against an empty database);
 - ✅ an Arq worker with the `ping` smoke task;
 - ✅ docker compose with the whole infrastructure;
-- ⏳ ORM models — empty, a stub;
-- ⏳ LLM clients — interfaces only, generation is not implemented;
-- ⏳ tool calling — the tool protocol (`libs/tools/base.py`), the registry
+- ✅ ORM models — `Conversation` and `Message` (OVE-11), with the first Alembic migration;
+- ✅ LLM clients — Anthropic and DeepSeek behind one provider-neutral tool-calling contract;
+- ✅ tool calling — the tool protocol (`libs/tools/base.py`), the registry
   (`libs/tools/registry.py`) and the dispatch loop inside `ChatService` are in place.
-  The first real tool is `web_search` (OVE-37): a search through the HTML version of
-  DuckDuckGo in the conversation's headless browser session, returning up to 8 results
-  (title, URL, snippet). Tools receive the turn's `conversation_id` as system context,
+  Two real tools are registered, both on the browser: `web_search` (OVE-37), a search
+  through the HTML version of DuckDuckGo in the conversation's headless browser session,
+  returning up to 8 results (title, URL, snippet), and `open_page` (OVE-38), which opens
+  an address and returns its title and the start of its text. Tools receive the turn's `conversation_id` as system context,
   next to — never inside — the arguments the model sends. A call to a tool that
   requires confirmation now pauses the turn instead of running: the pending action is
   stored in Redis and both transports report it distinctly (`202` with a
@@ -352,8 +380,9 @@ job; we do not merge a red CI.
   lazily inside the `apps/api` process, one `BrowserContext` per conversation so that
   cookies and logins survive across turns, a lease that keeps a context from being closed
   under a running call, and a sweeper that closes idle contexts — and the browser itself
-  once the last one is gone. `web_search` (OVE-37) is the first tool built on it; the next
-  browser tool arrives with OVE-38.
+  once the last one is gone. `web_search` (OVE-37) and `open_page` (OVE-38) are built on
+  it, and all browser traffic goes through an in-process SOCKS5 proxy that refuses
+  non-public addresses (SSRF protection, OVE-38).
   Installed separately with `uv sync --group browser`;
 - ✅ `apps/voice` — the loop is closed (OVE-45 … OVE-48): capture through `sounddevice`,
   openWakeWord detection and utterance capture in a worker thread, energy-based
@@ -364,6 +393,7 @@ job; we do not merge a red CI.
 - ✅ test infrastructure: pytest + pytest-asyncio + pytest-cov, fixtures
   (`db_session`, `async_client`), the `GET /health` smoke test;
 - ✅ ruff, mypy, pre-commit and CI on GitHub Actions;
-- ⏳ substantive tests — they arrive together with the business logic.
+- ✅ substantive tests — unit tests for the business logic, integration tests on live
+  PostgreSQL, Redis and Chromium; `uv run pytest --collect-only -q` shows the current count.
 
 The agent's business logic is added in separate tasks.
