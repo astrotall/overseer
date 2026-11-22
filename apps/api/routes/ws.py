@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, WebSocket, status
+from fastapi import APIRouter, Depends, WebSocket, status
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.types import Message
 
+from apps.api.auth import require_ws_access
 from apps.api.deps import ChatServiceDep, ConversationRepositoryDep, SessionDep
 from apps.api.exception_handlers import llm_error_status_code
 from apps.api.services import ChatService
@@ -16,6 +17,7 @@ from libs.core.logging import get_logger
 from libs.db.repositories import ConversationRepository
 from libs.schemas.chat import ConfirmationRequiredResponse, MessageResponse
 from libs.schemas.ws import (
+    WS_SUBPROTOCOL,
     WSConfirmationRequiredMessage,
     WSErrorMessage,
     WSErrorPayload,
@@ -136,7 +138,7 @@ async def _handle_turn(
     await _send_reply(websocket, MessageResponse(role=answer.role, content=answer.content))
 
 
-@router.websocket("/ws/chat")
+@router.websocket("/ws/chat", dependencies=[Depends(require_ws_access)])
 async def agent_ws(
     websocket: WebSocket,
     session: SessionDep,
@@ -144,7 +146,7 @@ async def agent_ws(
     chat_service: ChatServiceDep,
     conversation_id: uuid.UUID | None = None,
 ) -> None:
-    await websocket.accept()
+    await websocket.accept(subprotocol=WS_SUBPROTOCOL)
 
     resolved_id = await _resolve_conversation_id(repository, session, conversation_id)
     if resolved_id is None:

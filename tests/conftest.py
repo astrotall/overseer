@@ -8,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pydantic import SecretStr
 from redis.asyncio import Redis, from_url
 from redis.exceptions import AuthenticationError, RedisError, ResponseError
 from sqlalchemy.engine import make_url
@@ -26,7 +27,12 @@ from libs.confirmations import ConfirmationStore
 from libs.core.config import Settings, get_settings
 from libs.db import models
 from libs.llm import ToolCall
+from libs.schemas.ws import ws_auth_subprotocols
 from libs.tools import init_tool_registry, reset_tool_registry
+
+TEST_API_TOKEN = "overseer-test-token-not-a-secret-0123456789"
+AUTH_HEADERS = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+WS_AUTH_SUBPROTOCOLS = ws_auth_subprotocols(TEST_API_TOKEN)
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -72,6 +78,18 @@ def test_redis_url(settings: Settings) -> str:
     return urlunsplit(parts._replace(path=f"/{test_db}"))
 
 
+def redact_database_url(url: str) -> str:
+    return make_url(url).render_as_string(hide_password=True)
+
+
+def database_unavailable_reason(url: str, exc: BaseException) -> str:
+    password = make_url(url).password
+    detail = str(exc)
+    if password:
+        detail = detail.replace(str(password), "***")
+    return f"Тестовая БД недоступна ({redact_database_url(url)}): {detail}"
+
+
 def redact_redis_url(url: str) -> str:
     parts = urlsplit(url)
     if parts.password is None:
@@ -90,7 +108,7 @@ async def db_engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
         await engine.dispose()
         if os.getenv("CI"):
             raise
-        pytest.skip(f"Тестовая БД недоступна ({test_database_url}): {exc}")
+        pytest.skip(database_unavailable_reason(test_database_url, exc))
 
     yield engine
     await engine.dispose()
@@ -179,9 +197,16 @@ class UnreachableRedis:
         return unreachable
 
 
+def authenticated_settings(**overrides: object) -> Settings:
+    return get_settings().model_copy(
+        update={"api_token": SecretStr(TEST_API_TOKEN), "api_allowed_origins": [], **overrides}
+    )
+
+
 @pytest.fixture
 def app() -> Iterator[FastAPI]:
     init_tool_registry()
+    fastapi_app.dependency_overrides[get_settings] = lambda: authenticated_settings()
     fastapi_app.dependency_overrides[get_confirmation_store] = lambda: ConfirmationStore(
         UnreachableRedis()  # type: ignore[arg-type]  # заглушка вместо клиента Redis
     )
@@ -192,6 +217,14 @@ def app() -> Iterator[FastAPI]:
 
 @pytest.fixture
 async def async_client(app: FastAPI) -> AsyncIterator[AsyncClient]:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", headers=AUTH_HEADERS
+    ) as client:
+        yield client
+
+
+@pytest.fixture
+async def anonymous_client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
 

@@ -7,7 +7,7 @@ from typing import Final
 
 from apps.voice.audio import FrameQueue
 from apps.voice.capture import AudioCapture, resolve_device
-from apps.voice.config import VoiceSettings, get_voice_settings
+from apps.voice.config import VoiceSettings, get_voice_settings, require_api_token
 from apps.voice.confirmations import HTTPConfirmationAPI
 from apps.voice.cues import BeepCue
 from apps.voice.listener import AsyncioSink, Utterance, VoiceListener, WakeWordEvent
@@ -24,6 +24,7 @@ from apps.voice.tts import SileroTTS
 from apps.voice.vad import Endpointer
 from apps.voice.wake_word import OpenWakeWordDetector
 from apps.voice.ws_client import VoiceWSClient
+from libs.core.exceptions import ConfigurationError
 from libs.core.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -45,6 +46,7 @@ async def announce_wake_words(events: asyncio.Queue[WakeWordEvent], frames: Fram
 
 
 async def run(settings: VoiceSettings) -> None:
+    require_api_token(settings)
     loop = asyncio.get_running_loop()
     frames = FrameQueue()
     state = VoiceStateMachine()
@@ -144,7 +146,12 @@ def main() -> None:
             asyncio.run(say(settings, " ".join(argv[1:]).strip() or SAY_DEFAULT_TEXT))
             return
 
-        asyncio.run(run(settings))
+        try:
+            asyncio.run(run(settings))
+        except* ConfigurationError as group:
+            for exc in group.exceptions:
+                logger.error("voice.stopped", reason=str(exc))
+            raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

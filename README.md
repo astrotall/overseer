@@ -163,18 +163,22 @@ overseer/
 
 ```bash
 cp .env.example .env          # fill in the LLM keys if needed
+# then set API_TOKEN (and VOICE_API_TOKEN to the same value) in .env:
+openssl rand -hex 32
 docker compose -f docker/docker-compose.yml up --build
 ```
 
 This brings up `postgres:16`, `redis:7` (both with healthchecks), `api` and
-`worker`. The API is available at <http://localhost:8000>, the docs at
-<http://localhost:8000/docs>.
+`worker`. The API is available at <http://127.0.0.1:8000>, the docs at
+<http://127.0.0.1:8000/docs>. The API refuses to start without `API_TOKEN`.
 
 Check:
 
 ```bash
-curl http://localhost:8000/health
+curl http://127.0.0.1:8000/health
 # {"status":"ok"}
+curl -X POST -H "Authorization: Bearer $API_TOKEN" http://127.0.0.1:8000/conversations
+# {"conversation_id":"..."}
 ```
 
 Migrations inside the container:
@@ -220,6 +224,17 @@ uv run arq apps.worker.main.WorkerSettings                # worker (in another t
 > rejects the credentials. The decision record is in
 > [.claude/knowledge/architecture.md](.claude/knowledge/architecture.md), section
 > «Доступ к PostgreSQL и Redis».
+
+> **API access.** The API port is published on `127.0.0.1` only as well, and every
+> route except `GET /health` requires the bearer token from `API_TOKEN` (at least 32
+> characters from `A-Z a-z 0-9 . _ ~ -`; there is deliberately no default). REST clients
+> send `Authorization: Bearer <token>`; WebSocket clients offer the subprotocols
+> `overseer.v1` and `overseer.token.<token>`, because browsers cannot set headers on a
+> WebSocket. A browser page may open `/ws/chat` only if its `Origin` is listed in
+> `API_ALLOWED_ORIGINS` (empty by default). With `ENV=prod` the API also refuses to start
+> while `DATABASE_URL` or `REDIS_URL` still carries the local-development password. The
+> decision record is in [.claude/knowledge/architecture.md](.claude/knowledge/architecture.md),
+> section «Доступ к API».
 
 ### Migrations
 
@@ -303,11 +318,13 @@ versions at once.
 | `settings` / `test_database_url` | the project settings and the computed test database address |
 | `db_engine` | an async engine on the test database; the schema is created from `Base.metadata` once per run |
 | `db_session` | an `AsyncSession` inside an outer transaction: everything is rolled back after the test, tests never see each other's data |
-| `app` | a FastAPI instance; `dependency_overrides` are reset after the test |
-| `async_client` | an `httpx.AsyncClient` on top of the ASGI application |
+| `app` | a FastAPI instance whose `get_settings` carries a test-only API token; `dependency_overrides` are reset after the test |
+| `async_client` | an `httpx.AsyncClient` on top of the ASGI application, sending that token |
+| `anonymous_client` | the same client without the token, for `401` checks |
 
 `ASGITransport` does not run `lifespan`, so the PostgreSQL and Redis connections are not
-established in tests. For routes that need the DB, override the dependency via
+established in tests, and the startup check for `API_TOKEN` does not run either. WebSocket
+tests connect with `subprotocols=WS_AUTH_SUBPROTOCOLS` from `tests/conftest.py`. For routes that need the DB, override the dependency via
 `app.dependency_overrides[get_session]` together with the `db_session` fixture.
 
 ### Linters, types and git hooks
@@ -351,6 +368,11 @@ job; we do not merge a red CI.
   works against an empty database);
 - ✅ an Arq worker with the `ping` smoke task;
 - ✅ docker compose with the whole infrastructure;
+- ✅ API access control (OVE-61): the API is published on `127.0.0.1` only and every route
+  except `GET /health` requires a bearer token (`API_TOKEN`, no default); `/ws/chat` takes
+  the token in `Sec-WebSocket-Protocol`, refuses foreign browser origins and rejects the
+  handshake before any database session is opened. With `ENV=prod` the local-development
+  database and Redis passwords are refused at startup (OVE-62);
 - ✅ ORM models — `Conversation` and `Message` (OVE-11), with the first Alembic migration;
 - ✅ LLM clients — Anthropic and DeepSeek behind one provider-neutral tool-calling contract;
 - ✅ tool calling — the tool protocol (`libs/tools/base.py`), the registry

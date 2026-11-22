@@ -62,7 +62,8 @@ Redis (если нужны Windows и живой рабочий стол) → р
 и lifespan (подключения к PostgreSQL и Redis), конфиг через pydantic-settings,
 структурированные логи, async SQLAlchemy 2.x + Alembic, Arq-воркер со smoke-задачей `ping`,
 docker compose со всей инфраструктурой (порты PostgreSQL и Redis опубликованы только на
-`127.0.0.1`, Redis требует пароль — OVE-59), клиенты Anthropic и DeepSeek под общим контрактом
+`127.0.0.1`, Redis требует пароль — OVE-59; API тоже опубликован только на `127.0.0.1` и
+требует токен на всём, кроме `/health`, — OVE-61), клиенты Anthropic и DeepSeek под общим контрактом
 `libs/llm` (генерация построена целиком, с Эпика 1).
 
 Обвязка качества тоже настроена и работает: pytest с фикстурами в `tests/conftest.py`

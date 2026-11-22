@@ -25,6 +25,7 @@ from libs.db.session import get_session
 from libs.llm.base import ChatMessage, LLMClient, LLMResponse, ToolCall, ToolSpec
 from libs.llm.system_prompt import get_system_prompt_message
 from libs.tools import Tool, ToolResult, get_tool_registry
+from tests.conftest import WS_AUTH_SUBPROTOCOLS
 
 OK_RESPONSE = LLMResponse(model="fake-model", stop_reason="end_turn", text="готово")
 
@@ -162,7 +163,7 @@ async def conversation_id(db_engine: AsyncEngine) -> AsyncIterator[uuid.UUID]:
 
 def _exchange(client: TestClient, url: str, outgoing: Sequence[str]) -> list[dict[str, Any]]:
     received: list[dict[str, Any]] = []
-    with client.websocket_connect(url) as websocket:
+    with client.websocket_connect(url, subprotocols=WS_AUTH_SUBPROTOCOLS) as websocket:
         for raw in outgoing:
             websocket.send_text(raw)
             received.append(websocket.receive_json())
@@ -272,7 +273,9 @@ async def test_unknown_conversation_id_is_rejected_on_connect(
     _override_llm_client(app, FakeLLMClient())
 
     def _connect() -> tuple[dict[str, Any], bool]:
-        with client.websocket_connect(f"/ws/chat?conversation_id={uuid.uuid4()}") as websocket:
+        with client.websocket_connect(
+            f"/ws/chat?conversation_id={uuid.uuid4()}", subprotocols=WS_AUTH_SUBPROTOCOLS
+        ) as websocket:
             frame = websocket.receive_json()
             try:
                 websocket.receive_json()
@@ -298,7 +301,9 @@ async def test_malformed_conversation_id_is_rejected_before_handshake(
     def _connect() -> int:
         with (
             pytest.raises(WebSocketDisconnect) as exc_info,
-            client.websocket_connect("/ws/chat?conversation_id=not-a-uuid"),
+            client.websocket_connect(
+                "/ws/chat?conversation_id=not-a-uuid", subprotocols=WS_AUTH_SUBPROTOCOLS
+            ),
         ):
             pass
         return exc_info.value.code

@@ -304,7 +304,8 @@ uv run python -m apps.voice.main say "Отчёт за август сформи�
 
 | Ключ | Дефолт | Смысл |
 |---|---|---|
-| `VOICE_WS_URL` | `ws://localhost:8000/ws/chat` | адрес `/ws/chat` |
+| `VOICE_WS_URL` | `ws://127.0.0.1:8000/ws/chat` | адрес `/ws/chat` |
+| `VOICE_API_TOKEN` | пусто | тот же токен, что `API_TOKEN` у `apps/api`; без него клиент не стартует, а отказ сервера в токене (401/403) произносится один раз и останавливает клиент (OVE-61) |
 | `VOICE_CONVERSATION_ID` | пусто | диалог; пусто — сервер отдаёт диалог по умолчанию |
 | `VOICE_WS_RECONNECT_INITIAL_S` | `1.0` | первая пауза перед переподключением |
 | `VOICE_WS_RECONNECT_MAX_S` | `30.0` | потолок паузы |

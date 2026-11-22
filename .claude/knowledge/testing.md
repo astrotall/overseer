@@ -249,6 +249,24 @@
   текста, чужой `id` и слишком большой ответ; тексты для модели на каждый код; удалённый инструмент
   поверх порта). Фейк живёт в `libs/executor/fake.py`, а не в тестах: им будут пользоваться
   тесты инструментов OVE-31/32/42;
+- доступ к API (OVE-61) — `tests/unit/test_api_auth.py`, без PostgreSQL и Redis (сессия, репозиторий
+  и LLM подменены фейками): `401` без токена и с неверным токеном на каждом маршруте
+  `conversations` и `confirmations`, с одинаковым телом; проход с токеном; открытый `/health`;
+  обход **всех** HTTP-путей из `app.openapi()` анонимным клиентом (новый маршрут без защиты
+  краснеет здесь); шпион на `secrets.compare_digest`; сокет без токена, с неверным токеном, без
+  имени протокола, с двумя токенами, с чужим, `null` и даже собственным `Origin` — отказ до
+  рукопожатия, и сессия БД при этом не открывается ни разу; приём без `Origin` и с разрешённым
+  `Origin`. `test_the_token_never_reaches_any_log` поднимает **настоящий uvicorn** в потоке теста
+  (`lifespan="off"`, `log_config=None`, чтобы `caplog` видел access-лог) и гоняет рукопожатия и
+  REST клиентами `websockets` и `httpx` с логами на уровне DEBUG. Без фильтра редактирования тест
+  краснеет на дампе заголовков `websockets`. Отказ старта без токена — в
+  `tests/unit/test_api_startup.py`, валидация токена, origin и паролей при `ENV=prod` — в
+  `tests/unit/test_config.py`, фильтр логов — `tests/unit/test_logging.py`, клиенты `apps/voice` — в
+  `test_voice_ws_client.py` (`TestAuthentication`), `test_voice_confirmations.py`,
+  `test_voice_config.py`;
+- маскировка пароля в сообщении о пропуске тестов без базы (OVE-62) —
+  `tests/unit/test_database_test_fixtures.py`: фикстура `db_engine` на недоступном порту и текст
+  ошибки драйвера с паролем внутри;
 - секции `[tool.pytest.ini_options]` и `[tool.coverage.*]` в `pyproject.toml`;
 - `.pre-commit-config.yaml` — хуки на трёх стадиях (`pre-commit`, `commit-msg`, `pre-push`);
 - `.github/workflows/ci.yml` — CI на GitHub Actions.
@@ -396,11 +414,17 @@ Redis для тестов — та же схема: `REDIS_URL_TEST`, а без 
 | `test_database_url` | session | адрес тестовой БД (см. выше) |
 | `db_engine` | session | async engine на тестовой базе, `NullPool`; схема создаётся один раз через `Base.metadata.create_all` |
 | `db_session` | function | `AsyncSession` внутри внешней транзакции с `join_transaction_mode="create_savepoint"`; после теста всё откатывается, тесты не видят данных друг друга |
-| `app` | function | экземпляр FastAPI из `apps.api.main`; `dependency_overrides` сбрасываются после теста |
-| `async_client` | function | `httpx.AsyncClient` поверх `ASGITransport` |
+| `app` | function | экземпляр FastAPI из `apps.api.main`; `get_settings` подменён копией настроек с тестовым токеном `TEST_API_TOKEN` и пустым `API_ALLOWED_ORIGINS` (OVE-61); `dependency_overrides` сбрасываются после теста |
+| `async_client` | function | `httpx.AsyncClient` поверх `ASGITransport`, с заголовком `Authorization: Bearer TEST_API_TOKEN` |
+| `anonymous_client` | function | тот же клиент без заголовка — для проверок `401` |
 
 `ASGITransport` **не запускает `lifespan`**, поэтому в тестах не поднимаются подключения к
-PostgreSQL и Redis из `apps/api/main.py`. Роутам, которым нужна БД, подменяй зависимость:
+PostgreSQL и Redis из `apps/api/main.py`. По той же причине не срабатывает и проверка `API_TOKEN` на
+старте. Аутентификация в тестах идёт не обходом, а настоящей проверкой против подменённых
+настроек: `get_settings` в фикстуре `app` отдаёт настройки с `TEST_API_TOKEN`. WebSocket-тесты
+подключаются с `subprotocols=WS_AUTH_SUBPROTOCOLS` из `tests/conftest.py`, а
+`authenticated_settings(**overrides)` собирает настройки для теста, которому нужен свой
+`API_ALLOWED_ORIGINS` или отсутствующий токен. Роутам, которым нужна БД, подменяй зависимость:
 `app.dependency_overrides[get_session]` + фикстура `db_session`.
 
 ## Как раскладывать тесты

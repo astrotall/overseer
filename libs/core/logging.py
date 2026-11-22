@@ -1,12 +1,48 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
-from typing import Any
+from typing import Any, Final
 
 import structlog
 
 from libs.core.config import Settings, get_settings
+
+REDACTED: Final[str] = "***"
+SECRET_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"(overseer\.token\.)[A-Za-z0-9._~-]+"),
+)
+HEADER_DUMPING_LOGGERS: Final[tuple[str, ...]] = (
+    "uvicorn.error",
+    "uvicorn.asgi",
+    "websockets.client",
+    "websockets.server",
+)
+
+
+def redact_secrets(text: str) -> str:
+    for pattern in SECRET_PATTERNS:
+        text = pattern.sub(rf"\g<1>{REDACTED}", text)
+    return text
+
+
+class SecretRedactingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = redact_secrets(message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = None
+        return True
+
+
+def install_secret_redaction() -> None:
+    for name in HEADER_DUMPING_LOGGERS:
+        logger = logging.getLogger(name)
+        if not any(isinstance(existing, SecretRedactingFilter) for existing in logger.filters):
+            logger.addFilter(SecretRedactingFilter())
 
 
 def configure_logging(settings: Settings | None = None, *, level: str | None = None) -> None:
@@ -15,6 +51,7 @@ def configure_logging(settings: Settings | None = None, *, level: str | None = N
     log_level = getattr(logging, level_name, logging.INFO)
 
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=log_level)
+    install_secret_redaction()
 
     processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
