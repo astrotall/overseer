@@ -249,6 +249,30 @@
   текста, чужой `id` и слишком большой ответ; тексты для модели на каждый код; удалённый инструмент
   поверх порта). Фейк живёт в `libs/executor/fake.py`, а не в тестах: им будут пользоваться
   тесты инструментов OVE-31/32/42;
+- транспорт до `apps/executor` (OVE-60) — на **живом Redis**, `@pytest.mark.integration`; общие
+  построители запросов, `FakeExcelBackend` и сборка диспетчера над ним — в `tests/executor_support.py`
+  (обычный модуль, не `conftest.py`). `tests/integration/test_executor_redis_client.py` — клиент api
+  против подставного executor: отказ без heartbeat быстрее 250 мс и без постановки в очередь, снятие
+  невзятого запроса, гонка `LREM` против `BLPOP` в **обоих** исходах (подкласс `Redis` с барьером
+  перед `LREM`; `Redis.client()` сохраняет подкласс), смерть и перезапуск executor посреди вызова,
+  ответы вне контракта, отмена, потолок одновременных вызовов, порядок и отсутствие аргументов в
+  логах. `tests/integration/test_executor_consumer.py` — настоящие `ExecutorLease`,
+  `ExecutorConsumer` и `ExecutorService` над фейковым диспетчером с сокращёнными таймингами (TTL
+  1 с): дубликат `id`, истёкший `deadline`, версия, форма, мусор в очереди, баг в обработчике,
+  коды `Office*`, потолок вызова, порядок, heartbeat во время долгого вызова, второй экземпляр,
+  перезапуск после падения, потеря владения, мягкая остановка и отмена с вызовом в работе.
+  `tests/integration/test_executor_redis_acl.py` заводит пользователя сам (`ACL SETUSER` от
+  `default` с правилами из `docker/redis/executor.acl`, `ACL DELUSER` в конце), поэтому CI ничего
+  дополнительно не ставит: полный вызов от этого пользователя, отказы на чужих ключах и командах и
+  `ACL DRYRUN` для того, что нельзя пробовать по-настоящему (`SHUTDOWN`, `MONITOR`…). Юнит-тесты:
+  `test_executor_config.py` (настройки, prod-правила, ошибки без адреса, изоляция от окружения),
+  `test_executor_client_wiring.py` (тайминги клиента, `lifespan`, порядок fail-fast),
+  `test_executor_runtime.py` (диспетчер, точка входа), `test_executor_paths.py` (правила путей на
+  `PureWindowsPath`, разрешение ссылок через подставной резолвер), `test_executor_sessions.py` (книга
+  на разговор), `test_redis_acl_provisioning.py` (сборка конфига Redis скриптом
+  `docker/redis/entrypoint.sh` с заглушкой `docker-entrypoint.sh` в `PATH` и разбор compose-файла
+  текстом: PyYAML в CI не ставится). Настоящие junction'ы — `test_executor_paths_windows.py`,
+  `@pytest.mark.windows`, ни разу не запускались;
 - доступ к API (OVE-61) — `tests/unit/test_api_auth.py`, без PostgreSQL и Redis (сессия, репозиторий
   и LLM подменены фейками): `401` без токена и с неверным токеном на каждом маршруте
   `conversations` и `confirmations`, с одинаковым телом; проход с токеном; открытый `/health`;
@@ -417,7 +441,7 @@ Redis для тестов — та же схема: `REDIS_URL_TEST`, а без 
 | `app` | function | экземпляр FastAPI из `apps.api.main`; `get_settings` подменён копией настроек с тестовым токеном `TEST_API_TOKEN` и пустым `API_ALLOWED_ORIGINS` (OVE-61); `dependency_overrides` сбрасываются после теста |
 | `async_client` | function | `httpx.AsyncClient` поверх `ASGITransport`, с заголовком `Authorization: Bearer TEST_API_TOKEN` |
 | `anonymous_client` | function | тот же клиент без заголовка — для проверок `401` |
-| `hermetic_settings` | function | **не autouse**; хук `pytest_collection_modifyitems` вешает её на каждый тест под `tests/unit` (см. ниже): убирает из окружения переменные всех полей `Settings` и `VoiceSettings`, отключает чтение `.env` у обоих классов и сбрасывает кэш `get_settings()` до и после теста |
+| `hermetic_settings` | function | **не autouse**; хук `pytest_collection_modifyitems` вешает её на каждый тест под `tests/unit` (см. ниже): убирает из окружения переменные всех полей `Settings`, `VoiceSettings` и `ExecutorSettings` (включая алиасы вроде `ENV`), отключает чтение `.env` у всех трёх классов и сбрасывает кэши `get_settings()` и `get_executor_settings()` до и после теста |
 
 `ASGITransport` **не запускает `lifespan`**, поэтому в тестах не поднимаются подключения к
 PostgreSQL и Redis из `apps/api/main.py`. По той же причине не срабатывает и проверка `API_TOKEN` на

@@ -4,11 +4,9 @@ import asyncio
 import sys
 import threading
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
 
 import pytest
 
-from apps.executor.excel.backend import WorkbookHandle
 from apps.executor.excel.com_backend import Win32ExcelBackend
 from apps.executor.excel.controller import (
     FILE_EXISTS_TEXT,
@@ -23,7 +21,6 @@ from apps.executor.excel.validation import (
     MAX_WRITE_CELLS,
     XL_OPEN_XML_WORKBOOK,
     XL_OPEN_XML_WORKBOOK_MACRO_ENABLED,
-    CellRows,
 )
 from apps.executor.sta import StaThreadUnavailableError
 from libs.core.exceptions import (
@@ -35,122 +32,11 @@ from libs.core.exceptions import (
     OfficeTimeoutError,
     OfficeUnsavedChangesError,
 )
+from tests.executor_support import FakeExcelBackend
 
 REPORT = "C:\\Users\\me\\report.xlsx"
 OTHER = "C:\\Users\\me\\other.xlsx"
 WAIT_S = 2.0
-
-
-@dataclass
-class FakeWorkbook:
-    path: str | None
-    sheets: list[str] = field(default_factory=lambda: ["Лист1"])
-    dirty: bool = False
-    closed: bool = False
-    writes: list[tuple[str, str, CellRows]] = field(default_factory=list)
-
-
-class FakeExcelBackend:
-    def __init__(self, *, files: set[str] | None = None) -> None:
-        self.files = set(files or ())
-        self.workbooks: dict[WorkbookHandle, FakeWorkbook] = {}
-        self.calls: list[tuple[str, int]] = []
-        self.saved: list[tuple[str, str | None, int | None]] = []
-        self.fail: dict[str, BaseException] = {}
-        self.block: dict[str, threading.Event] = {}
-        self.entered = threading.Event()
-        self.exited = threading.Event()
-        self.pumps = 0
-        self._next = 1
-
-    def _record(self, name: str) -> None:
-        self.calls.append((name, threading.get_ident()))
-        gate = self.block.get(name)
-        if gate is not None:
-            gate.wait(WAIT_S * 5)
-        failure = self.fail.get(name)
-        if failure is not None:
-            raise failure
-
-    @property
-    def names(self) -> list[str]:
-        return [name for name, _ in self.calls]
-
-    @property
-    def threads(self) -> set[int]:
-        return {ident for _, ident in self.calls}
-
-    def enter_thread(self) -> None:
-        self._record("enter_thread")
-        self.entered.set()
-
-    def exit_thread(self) -> None:
-        self._record("exit_thread")
-        self.exited.set()
-
-    def pump(self) -> None:
-        self.pumps += 1
-
-    def path_exists(self, path: str) -> bool:
-        self._record("path_exists")
-        return path.casefold() in {known.casefold() for known in self.files}
-
-    def open_workbook(self, path: str) -> WorkbookHandle:
-        self._record("open_workbook")
-        return self._register(FakeWorkbook(path=path))
-
-    def create_workbook(self) -> WorkbookHandle:
-        self._record("create_workbook")
-        return self._register(FakeWorkbook(path=None))
-
-    def close_workbook(self, workbook: WorkbookHandle) -> None:
-        self._record("close_workbook")
-        self.workbooks[workbook].closed = True
-
-    def is_dirty(self, workbook: WorkbookHandle) -> bool:
-        self._record("is_dirty")
-        return self.workbooks[workbook].dirty
-
-    def sheet_names(self, workbook: WorkbookHandle) -> list[str]:
-        self._record("sheet_names")
-        return list(self.workbooks[workbook].sheets)
-
-    def add_sheet(self, workbook: WorkbookHandle, name: str) -> None:
-        self._record("add_sheet")
-        self.workbooks[workbook].sheets.append(name)
-
-    def write_range(
-        self, workbook: WorkbookHandle, sheet: str, address: str, values: CellRows
-    ) -> None:
-        self._record("write_range")
-        book = self.workbooks[workbook]
-        book.writes.append((sheet, address, values))
-        book.dirty = True
-
-    def save(self, workbook: WorkbookHandle) -> None:
-        self._record("save")
-        book = self.workbooks[workbook]
-        self.saved.append(("save", book.path, None))
-        book.dirty = False
-
-    def save_as(self, workbook: WorkbookHandle, path: str, file_format: int) -> None:
-        self._record("save_as")
-        book = self.workbooks[workbook]
-        self.saved.append(("save_as", path, file_format))
-        book.path = path
-        book.dirty = False
-        self.files.add(path)
-
-    def _register(self, workbook: FakeWorkbook) -> WorkbookHandle:
-        handle = WorkbookHandle(self._next)
-        self._next += 1
-        self.workbooks[handle] = workbook
-        return handle
-
-    def only(self) -> FakeWorkbook:
-        open_books = [book for book in self.workbooks.values() if not book.closed]
-        assert len(open_books) == 1
-        return open_books[0]
 
 
 @pytest.fixture

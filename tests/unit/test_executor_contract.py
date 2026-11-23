@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 import uuid
@@ -482,6 +483,28 @@ class TestErrorCodes:
 
 
 class TestAlignmentWithTheController:
+    def test_the_controller_takes_the_shared_caps_from_the_contract(self) -> None:
+        tree = ast.parse(inspect.getsource(excel_validation))
+        assigned = {
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign | ast.AnnAssign)
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            if isinstance(target, ast.Name)
+        }
+        imported = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "libs.schemas.executor"
+            for alias in node.names
+        }
+        shared = {"MAX_WRITE_CELLS", "MAX_CELL_TEXT_CHARS", "MAX_SHEET_NAME_CHARS"}
+
+        assert shared <= imported
+        assert not shared & assigned
+        assert excel_validation.MAX_WRITE_CELLS is MAX_CELLS
+        assert excel_validation.MAX_CELL_TEXT_CHARS is MAX_CELL_TEXT_CHARS
+
     def test_wire_caps_match_the_controller_limits(self) -> None:
         assert MAX_CELLS == excel_validation.MAX_WRITE_CELLS
         assert MAX_CELL_TEXT_CHARS == excel_validation.MAX_CELL_TEXT_CHARS

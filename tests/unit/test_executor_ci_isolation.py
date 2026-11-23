@@ -17,6 +17,13 @@ CI_SAFE_MODULES = [
     "apps.executor.excel.backend",
     "apps.executor.excel.controller",
     "apps.executor.excel.com_backend",
+    "apps.executor.config",
+    "apps.executor.lease",
+    "apps.executor.consumer",
+    "apps.executor.dispatch",
+    "apps.executor.main",
+    "apps.executor.paths",
+    "apps.executor.excel.sessions",
 ]
 PYWIN32_PACKAGES = (
     "win32com",

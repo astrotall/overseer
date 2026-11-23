@@ -95,8 +95,8 @@ answer → the answer goes back to the client over REST or WebSocket.
 The diagram is the target picture. In v1 the tool-calling loop lives in
 `ChatService` inside `api`, and Python tools run there; `worker` only has the
 `ping` smoke task so far, the `api` ↔ `executor` transport is designed (OVE-29)
-but not implemented, and replies arrive whole — token streaming is not there
-yet.
+and implemented (OVE-60) but no tool uses it yet, and replies arrive whole —
+token streaming is not there yet.
 
 ## Stack
 
@@ -145,7 +145,7 @@ overseer/
 │   ├── tools/               # the tool protocol, the registry and the tools themselves
 │   ├── browser/             # Playwright session lifecycle, SSRF egress proxy
 │   ├── confirmations/       # pending confirmations of irreversible actions (Redis)
-│   ├── executor/            # the ExecutorClient port to apps/executor and its fake
+│   ├── executor/            # the ExecutorClient port to apps/executor, its Redis client and fake
 │   └── schemas/             # Pydantic v2 DTOs
 ├── alembic/                 # migrations, env.py wired to the async engine and libs.db
 ├── docker/
@@ -393,11 +393,13 @@ job; we do not merge a red CI.
   (OVE-41): open or create a workbook, write a range, save. All COM calls run on one
   dedicated STA thread, Excel is a private `DispatchEx` instance (the user's own Excel is
   never attached to or quit), and model-supplied strings are written as literal text unless
-  formulas are explicitly requested. The transport to `api` is designed (OVE-29: a Redis
-  list queue with a heartbeat, at-most-once delivery); only the message contract
-  (`libs/schemas/executor.py`) and the `ExecutorClient` port with a fake exist so far, and
-  there are no Excel tools yet; everything that needs real COM is tested only on Windows and has not been run
-  there yet;
+  formulas are explicitly requested. The transport to `api` is designed (OVE-29) and
+  implemented (OVE-60): `RedisExecutorClient` on the api side, a consumer loop with a
+  single-owner lease and heartbeat on the executor side (`python -m apps.executor.main`),
+  at-most-once delivery, a dedicated Redis ACL user that only reaches
+  `overseer:executor:*`, a folder allowlist and one workbook per conversation. There are no
+  Excel tools yet; everything that needs real COM or a real Windows filesystem is tested only
+  on Windows and has not been run there yet;
 - ✅ `libs/browser` — the Playwright session lifecycle (OVE-36): a headless Chromium started
   lazily inside the `apps/api` process, one `BrowserContext` per conversation so that
   cookies and logins survive across turns, a lease that keeps a context from being closed

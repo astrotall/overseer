@@ -1,0 +1,5 @@
+resetchannels -@all
++ping +select +client|setinfo
++blpop ~overseer:executor:requests
+(+rpush +expire ~overseer:executor:reply:*)
+(+get +set +del +eval ~overseer:executor:heartbeat ~overseer:executor:owner ~overseer:executor:seen:*)

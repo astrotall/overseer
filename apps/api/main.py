@@ -13,6 +13,7 @@ from libs.core.config import get_settings, validate_api_token, validate_llm_prov
 from libs.core.logging import configure_logging, get_logger
 from libs.db.redis import close_redis, init_redis
 from libs.db.session import close_engine, init_engine
+from libs.executor import close_executor_client, init_executor_client
 from libs.llm.base import LLMClient
 from libs.llm.factory import get_llm_client, reset_llm_client_cache
 from libs.tools import (
@@ -39,6 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     llm_client: LLMClient | None = None
     browser_manager: BrowserSessionManager[BrowserContext] | None = None
     try:
+        init_executor_client(settings)
         init_engine(settings)
         redis = init_redis(settings)
         await redis.ping()
@@ -60,6 +62,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await llm_client.aclose()
         reset_llm_client_cache()
         reset_tool_registry()
+        await close_executor_client()
         await close_redis()
         await close_engine()
         logger.info("api.shutdown")

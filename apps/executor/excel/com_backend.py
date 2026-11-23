@@ -236,9 +236,13 @@ class Win32ExcelBackend:
         if app is None:
             return
 
+        unsaved = 0
         for handle, workbook in list(self._workbooks.items()):
             try:
                 with self._translating("close"):
+                    if not bool(workbook.Saved):
+                        unsaved += 1
+                        continue
                     workbook.Close(SaveChanges=False)
                 del self._workbooks[handle]
             except OfficeError:
@@ -247,7 +251,9 @@ class Win32ExcelBackend:
         with self._translating("count_workbooks"):
             foreign = int(app.Workbooks.Count) - len(self._workbooks)
 
-        if foreign > 0:
+        if unsaved:
+            logger.warning("excel.unsaved_workbooks_kept", unsaved=unsaved, pid=self._pid)
+        if foreign > 0 or unsaved:
             self._hand_over(app, foreign)
             return
         self._quit_quietly(app)
