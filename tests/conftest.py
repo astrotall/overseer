@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
@@ -23,6 +24,7 @@ from sqlalchemy.pool import NullPool
 
 from apps.api.deps import get_confirmation_store
 from apps.api.main import app as fastapi_app
+from apps.voice.config import VoiceSettings
 from libs.confirmations import ConfirmationStore
 from libs.core.config import Settings, get_settings
 from libs.db import models
@@ -35,14 +37,45 @@ AUTH_HEADERS = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
 WS_AUTH_SUBPROTOCOLS = ws_auth_subprotocols(TEST_API_TOKEN)
 
 
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    if sys.platform == "win32":
-        return
+UNIT_TESTS_DIR = Path(__file__).parent / "unit"
+HERMETIC_SETTINGS_FIXTURE = "hermetic_settings"
 
+
+def _settings_env_names(settings_cls: type[Settings] | type[VoiceSettings]) -> set[str]:
+    prefix = str(settings_cls.model_config.get("env_prefix", "")).lower()
+    return {f"{prefix}{name}" for name in settings_cls.model_fields}
+
+
+SETTINGS_ENV_NAMES = _settings_env_names(Settings) | _settings_env_names(VoiceSettings)
+
+
+def _needs_hermetic_settings(item: pytest.Item) -> bool:
+    return (
+        isinstance(item, pytest.Function)
+        and item.path.is_relative_to(UNIT_TESTS_DIR)
+        and HERMETIC_SETTINGS_FIXTURE not in item.fixturenames
+    )
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     skip = pytest.mark.skip(reason="требует Windows и live-сессии пользователя (apps/executor)")
     for item in items:
-        if item.get_closest_marker("windows") is not None:
+        if sys.platform != "win32" and item.get_closest_marker("windows") is not None:
             item.add_marker(skip)
+        if isinstance(item, pytest.Function) and _needs_hermetic_settings(item):
+            item.fixturenames.insert(0, HERMETIC_SETTINGS_FIXTURE)
+
+
+@pytest.fixture
+def hermetic_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    for key in list(os.environ):
+        if key.lower() in SETTINGS_ENV_NAMES:
+            monkeypatch.delenv(key)
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    monkeypatch.setitem(VoiceSettings.model_config, "env_file", None)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture(scope="session")

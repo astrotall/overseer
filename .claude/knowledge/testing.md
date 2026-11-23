@@ -417,6 +417,7 @@ Redis для тестов — та же схема: `REDIS_URL_TEST`, а без 
 | `app` | function | экземпляр FastAPI из `apps.api.main`; `get_settings` подменён копией настроек с тестовым токеном `TEST_API_TOKEN` и пустым `API_ALLOWED_ORIGINS` (OVE-61); `dependency_overrides` сбрасываются после теста |
 | `async_client` | function | `httpx.AsyncClient` поверх `ASGITransport`, с заголовком `Authorization: Bearer TEST_API_TOKEN` |
 | `anonymous_client` | function | тот же клиент без заголовка — для проверок `401` |
+| `hermetic_settings` | function | **не autouse**; хук `pytest_collection_modifyitems` вешает её на каждый тест под `tests/unit` (см. ниже): убирает из окружения переменные всех полей `Settings` и `VoiceSettings`, отключает чтение `.env` у обоих классов и сбрасывает кэш `get_settings()` до и после теста |
 
 `ASGITransport` **не запускает `lifespan`**, поэтому в тестах не поднимаются подключения к
 PostgreSQL и Redis из `apps/api/main.py`. По той же причине не срабатывает и проверка `API_TOKEN` на
@@ -433,8 +434,14 @@ PostgreSQL и Redis из `apps/api/main.py`. По той же причине н�
   в сеть и в БД.
 - `tests/integration/` — с живыми PostgreSQL и Redis: репозитории, эндпоинты, Arq-задачи.
   Помечаются `@pytest.mark.integration`.
-- Общие фикстуры — в `tests/conftest.py`, специфичные для подкаталога — в его собственном
-  `conftest.py` (пока такого нет).
+- Все фикстуры и хуки — в одном `tests/conftest.py`; **второго `conftest.py` под `tests/` быть не
+  должно**. В `tests/` нет `__init__.py`, поэтому mypy видит каждый такой файл как модуль
+  `conftest`, и `uv run mypy tests` останавливается на `Duplicate module named "conftest"`
+  (та же причина, по которой `assert_tool_calls_conform_to_contract` живёт в корневом файле,
+  OVE-6). Фикстура, нужная одному подкаталогу, объявляется в корневом файле и вешается на его
+  тесты хуком: так сделана `hermetic_settings` — хук добавляет её в начало `fixturenames`
+  каждой функции из `tests/unit` (повторно не добавляет), а интеграционные тесты продолжают
+  читать настоящее окружение и `.env`. Новый юнит-тест получает её автоматически.
 - Тесты, которым нужен живой Chromium, помечаются `@pytest.mark.browser` и лежат в
   `tests/integration/`: маркер `integration` в проекте означает живые PostgreSQL и Redis, а
   браузеру нужен другой внешний движок — смешивать их в одном маркере значило бы требовать
