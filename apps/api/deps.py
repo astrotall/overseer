@@ -12,6 +12,7 @@ from libs.core.config import Settings, get_settings
 from libs.db.redis import get_redis
 from libs.db.repositories import ConversationRepository
 from libs.db.session import get_session
+from libs.executor import ExecutorClient, get_executor_client
 from libs.llm.base import LLMClient
 from libs.llm.factory import get_llm_client
 from libs.tools import ToolRegistry, get_tool_registry
@@ -20,6 +21,7 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 RedisDep = Annotated[Redis, Depends(get_redis)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 ToolRegistryDep = Annotated[ToolRegistry, Depends(get_tool_registry)]
+ExecutorClientDep = Annotated[ExecutorClient, Depends(get_executor_client)]
 
 
 def get_confirmation_store(redis: RedisDep) -> ConfirmationStore:
@@ -73,6 +75,7 @@ __all__ = [
     "ConfirmationServiceDep",
     "ConfirmationStoreDep",
     "ConversationRepositoryDep",
+    "ExecutorClientDep",
     "LLMClientDep",
     "RedisDep",
     "SessionDep",

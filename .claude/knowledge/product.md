@@ -94,8 +94,9 @@ mypy, `alembic upgrade head` на чистой базе и весь набор �
 
 В `apps/executor` есть первый COM-контроллер — `ExcelController` (OVE-41): открыть или
 создать книгу, записать диапазон, сохранить. Транспорт до него спроектирован (OVE-29: Redis-очередь,
-heartbeat, at-most-once; в коде — контракт сообщений и порт `ExecutorClient` с фейком), но не
-реализован; инструментов Excel над ним ещё нет, а на живом Windows он не запускался — см.
+heartbeat, at-most-once) и реализован (OVE-60: `RedisExecutorClient` в api, цикл приёма с
+владением очередью в executor, отдельный ACL-пользователь Redis, разрешённые папки, книга на
+разговор); инструментов Excel над ним ещё нет, а на живом Windows он не запускался — см.
 [architecture-executor.md](architecture-executor.md). ORM-модели тоже
 уже есть: `Conversation` и `Message` (OVE-11) вместе с первой Alembic-миграцией.
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import PureWindowsPath
 from types import TracebackType
 from typing import Final, TypeVar
 
@@ -24,6 +26,7 @@ from apps.executor.sta import StaThread
 from libs.core.exceptions import (
     OfficeError,
     OfficeFileExistsError,
+    OfficeFileLockedError,
     OfficeInputError,
     OfficeTimeoutError,
     OfficeUnsavedChangesError,
@@ -47,6 +50,12 @@ UNSAVED_TEXT: Final = (
     "В открытой книге есть несохранённые изменения: сохраните её, прежде чем открывать другую"
 )
 TIMEOUT_TEXT: Final = "Excel не ответил за {seconds:g} с; выполнилась ли операция, неизвестно"
+OTHER_CONVERSATION_TEXT: Final = (
+    "Книга с таким именем уже открыта в другом разговоре: Excel не держит две книги с "
+    "одним именем файла в одном экземпляре"
+)
+
+Scope = uuid.UUID | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +91,13 @@ class _Workbook:
             for candidate in (self.path, self.target)
         )
 
+    def shares_name_with(self, path: str) -> bool:
+        name = PureWindowsPath(path).name.casefold()
+        return any(
+            candidate is not None and PureWindowsPath(candidate).name.casefold() == name
+            for candidate in (self.path, self.target)
+        )
+
 
 def _noop() -> None:
     return None
@@ -106,15 +122,19 @@ class ExcelController:
             idle=backend.pump,
         )
         self._lock = asyncio.Lock()
-        self._workbook: _Workbook | None = None
+        self._workbooks: dict[Scope, _Workbook] = {}
 
     @property
     def running(self) -> bool:
         return self._thread.running
 
+    @property
+    def conversations(self) -> frozenset[Scope]:
+        return frozenset(self._workbooks)
+
     async def start(self) -> None:
         async with self._lock:
-            self._workbook = None
+            self._workbooks.clear()
             self._thread.start()
             try:
                 await self._call(_noop)
@@ -123,7 +143,7 @@ class ExcelController:
                 raise
 
     async def aclose(self) -> None:
-        self._workbook = None
+        self._workbooks.clear()
         await asyncio.to_thread(self._thread.stop, self._stop_timeout_s)
 
     async def __aenter__(self) -> ExcelController:
@@ -138,19 +158,23 @@ class ExcelController:
     ) -> None:
         await self.aclose()
 
-    async def open_or_create_workbook(self, path: str | None) -> WorkbookInfo:
+    async def open_or_create_workbook(
+        self, path: str | None, *, conversation_id: Scope = None
+    ) -> WorkbookInfo:
         target = None if path is None else validate_workbook_path(path)
 
         async with self._lock:
-            current = self._workbook
+            current = self._workbooks.get(conversation_id)
             if current is not None and target is not None and current.bound_to(target):
                 return WorkbookInfo(path=target, created=current.path is None)
+            if target is not None:
+                self._refuse_names_of_others(conversation_id, target)
 
             previous = None if current is None else current.handle
             handle, created = await self._call(
                 lambda: _replace_workbook(self._backend, previous, target)
             )
-            self._workbook = _Workbook(
+            self._workbooks[conversation_id] = _Workbook(
                 handle=handle,
                 path=None if created else target,
                 target=target if created else None,
@@ -166,6 +190,7 @@ class ExcelController:
         data: Sequence[Sequence[CellValue]],
         *,
         formulas: bool = False,
+        conversation_id: Scope = None,
     ) -> WriteResult:
         name = validate_sheet_name(sheet)
         start = parse_cell(start_cell)
@@ -174,7 +199,7 @@ class ExcelController:
         payload = to_excel_payload(rows, formulas=formulas)
 
         async with self._lock:
-            handle = self._require_workbook().handle
+            handle = self._require_workbook(conversation_id).handle
             actual, created = await self._call(
                 lambda: _write(self._backend, handle, name, address, payload)
             )
@@ -194,14 +219,17 @@ class ExcelController:
             sheet_created=created,
         )
 
-    async def save(self, path: str | None = None, *, overwrite: bool = False) -> SaveResult:
+    async def save(
+        self, path: str | None = None, *, overwrite: bool = False, conversation_id: Scope = None
+    ) -> SaveResult:
         target = None if path is None else validate_workbook_path(path)
 
         async with self._lock:
-            workbook = self._require_workbook()
+            workbook = self._require_workbook(conversation_id)
             destination = target or workbook.path or workbook.target
             if destination is None:
                 raise OfficeInputError(NO_SAVE_PATH_TEXT)
+            self._refuse_names_of_others(conversation_id, destination)
 
             in_place = workbook.path is not None and same_path(workbook.path, destination)
             if in_place and workbook.path is not None:
@@ -215,15 +243,35 @@ class ExcelController:
                     overwrite=overwrite,
                 )
             )
-            self._workbook = _Workbook(handle=workbook.handle, path=destination, target=None)
+            self._workbooks[conversation_id] = _Workbook(
+                handle=workbook.handle, path=destination, target=None
+            )
 
         logger.info("excel.workbook_saved", saved_as=not in_place, overwrite=overwrite)
         return SaveResult(path=destination, saved_as=not in_place)
 
-    def _require_workbook(self) -> _Workbook:
-        if self._workbook is None:
+    async def release(self, conversation_id: Scope = None) -> bool:
+        async with self._lock:
+            workbook = self._workbooks.get(conversation_id)
+            if workbook is None:
+                return True
+            closed = await self._call(lambda: _close_if_clean(self._backend, workbook.handle))
+            if closed:
+                del self._workbooks[conversation_id]
+
+        logger.info("excel.workbook_released", closed=closed)
+        return closed
+
+    def _require_workbook(self, conversation_id: Scope) -> _Workbook:
+        workbook = self._workbooks.get(conversation_id)
+        if workbook is None:
             raise OfficeInputError(NO_WORKBOOK_TEXT)
-        return self._workbook
+        return workbook
+
+    def _refuse_names_of_others(self, conversation_id: Scope, path: str) -> None:
+        for owner, workbook in self._workbooks.items():
+            if owner != conversation_id and workbook.shares_name_with(path):
+                raise OfficeFileLockedError(OTHER_CONVERSATION_TEXT)
 
     async def _call(self, fn: Callable[[], T]) -> T:
         limit = self._call_timeout_s
@@ -257,6 +305,13 @@ def _replace_workbook(
         except OfficeError:
             logger.warning("excel.previous_workbook_close_failed")
     return handle, created
+
+
+def _close_if_clean(backend: ExcelBackend, handle: WorkbookHandle) -> bool:
+    if backend.is_dirty(handle):
+        return False
+    backend.close_workbook(handle)
+    return True
 
 
 def _write(

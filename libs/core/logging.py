@@ -13,6 +13,9 @@ REDACTED: Final[str] = "***"
 SECRET_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
     re.compile(r"(overseer\.token\.)[A-Za-z0-9._~-]+"),
+    re.compile(r"(?i)(rediss?://[^:/@\s]*:)[^@\s]+(?=@)"),
+    re.compile(r"(?i)(\b(?:REDIS_EXECUTOR_PASSWORD|REDIS_PASSWORD)\s*[=:]\s*[\"']?)[^\s\"',]+"),
+    re.compile(r"(?i)(\buser\s+\S+\s+(?:\S+\s+)*?>)[^\s]+"),
 )
 HEADER_DUMPING_LOGGERS: Final[tuple[str, ...]] = (
     "uvicorn.error",
@@ -26,6 +29,15 @@ def redact_secrets(text: str) -> str:
     for pattern in SECRET_PATTERNS:
         text = pattern.sub(rf"\g<1>{REDACTED}", text)
     return text
+
+
+def redact_event_secrets(
+    logger: object, method_name: str, event_dict: structlog.typing.EventDict
+) -> structlog.typing.EventDict:
+    for key, value in event_dict.items():
+        if isinstance(value, str):
+            event_dict[key] = redact_secrets(value)
+    return event_dict
 
 
 class SecretRedactingFilter(logging.Filter):
@@ -60,6 +72,7 @@ def configure_logging(settings: Settings | None = None, *, level: str | None = N
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
+        redact_event_secrets,
     ]
     renderer = (
         structlog.processors.JSONRenderer()

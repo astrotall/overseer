@@ -8,16 +8,16 @@ from pathlib import PureWindowsPath
 from typing import Final
 
 from libs.core.exceptions import OfficeInputError
+from libs.schemas.executor import MAX_CELL_TEXT_CHARS as MAX_CELL_TEXT_CHARS
+from libs.schemas.executor import MAX_CELLS as MAX_WRITE_CELLS
+from libs.schemas.executor import MAX_SHEET_CHARS as MAX_SHEET_NAME_CHARS
 
 CellValue = str | int | float | bool | None
 CellRows = tuple[tuple[CellValue, ...], ...]
 
 MAX_ROWS: Final = 1_048_576
 MAX_COLUMNS: Final = 16_384
-MAX_WRITE_CELLS: Final = 10_000
-MAX_CELL_TEXT_CHARS: Final = 32_767
 MAX_EXACT_INTEGER: Final = 999_999_999_999_999
-MAX_SHEET_NAME_CHARS: Final = 31
 MAX_PATH_CHARS: Final = 218
 MAX_ECHOED_CHARS: Final = 40
 

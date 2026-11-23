@@ -130,6 +130,24 @@ class Settings(BaseSettings):
         description="Потолок одновременно открытых браузерных контекстов на процесс",
     )
 
+    executor_pickup_timeout_s: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Сколько api ждёт, пока executor возьмёт запрос из очереди (ответ accepted). "
+            "Не взял — запрос снимается с очереди (LREM), и модель узнаёт, что действие "
+            "не выполнено"
+        ),
+    )
+    executor_call_budget_s: float = Field(
+        default=70.0,
+        gt=0,
+        description=(
+            "Потолок ожидания результата вызова executor. Больше таймаута COM-вызова "
+            "контроллера (60 с) и не больше окна контракта (120 с)"
+        ),
+    )
+
     @field_validator("api_token", mode="before")
     @classmethod
     def _blank_token_means_unset(cls, value: object) -> object:

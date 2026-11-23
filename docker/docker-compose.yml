@@ -26,22 +26,21 @@ services:
     image: redis:7-alpine
     container_name: overseer-redis
     restart: unless-stopped
-    # Пароль обязателен (OVE-59). requirepass передаётся конфигом через stdin
-    # («redis-server -»), а не аргументом: аргументы процесса видны в ps хоста.
-    # exec docker-entrypoint.sh сохраняет штатный сброс прав до пользователя redis.
+    # Пароль обязателен (OVE-59). Конфиг собирает docker/redis/entrypoint.sh и отдаёт
+    # серверу через stdin («redis-server -»), а не аргументами: аргументы процесса видны
+    # в ps хоста. exec docker-entrypoint.sh сохраняет штатный сброс прав до пользователя
+    # redis. Если задан REDIS_EXECUTOR_PASSWORD, тем же конфигом заводится
+    # ACL-пользователь overseer-executor с правилами из docker/redis/executor.acl
+    # (OVE-60); не задан — пользователя нет, всё работает как раньше.
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-overseer}
-    command:
-      - sh
-      - -c
-      - |
-        exec docker-entrypoint.sh redis-server - --appendonly yes <<EOF
-        requirepass $$REDIS_PASSWORD
-        EOF
+      REDIS_EXECUTOR_PASSWORD: ${REDIS_EXECUTOR_PASSWORD:-}
+    command: ["sh", "/usr/local/etc/overseer/entrypoint.sh", "--appendonly", "yes"]
     ports:
       - "127.0.0.1:${REDIS_PORT:-56379}:6379"
     volumes:
       - redisdata:/data
+      - ./redis:/usr/local/etc/overseer:ro
     # redis-cli выходит с кодом 0 и на NOAUTH, поэтому проверяется сам ответ PONG.
     healthcheck:
       test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -qx PONG"]

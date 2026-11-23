@@ -24,6 +24,7 @@ from sqlalchemy.pool import NullPool
 
 from apps.api.deps import get_confirmation_store
 from apps.api.main import app as fastapi_app
+from apps.executor.config import ExecutorSettings, get_executor_settings
 from apps.voice.config import VoiceSettings
 from libs.confirmations import ConfirmationStore
 from libs.core.config import Settings, get_settings
@@ -41,12 +42,27 @@ UNIT_TESTS_DIR = Path(__file__).parent / "unit"
 HERMETIC_SETTINGS_FIXTURE = "hermetic_settings"
 
 
-def _settings_env_names(settings_cls: type[Settings] | type[VoiceSettings]) -> set[str]:
+SettingsClass = type[Settings] | type[VoiceSettings] | type[ExecutorSettings]
+HERMETIC_SETTINGS_CLASSES: tuple[SettingsClass, ...] = (Settings, VoiceSettings, ExecutorSettings)
+
+
+def _alias_names(alias: object) -> set[str]:
+    if isinstance(alias, str):
+        return {alias.lower()}
+    choices = getattr(alias, "choices", ())
+    return {choice.lower() for choice in choices if isinstance(choice, str)}
+
+
+def _settings_env_names(settings_cls: SettingsClass) -> set[str]:
     prefix = str(settings_cls.model_config.get("env_prefix", "")).lower()
-    return {f"{prefix}{name}" for name in settings_cls.model_fields}
+    names: set[str] = set()
+    for name, info in settings_cls.model_fields.items():
+        names.add(f"{prefix}{name}")
+        names |= _alias_names(info.validation_alias)
+    return names
 
 
-SETTINGS_ENV_NAMES = _settings_env_names(Settings) | _settings_env_names(VoiceSettings)
+SETTINGS_ENV_NAMES = set().union(*(_settings_env_names(cls) for cls in HERMETIC_SETTINGS_CLASSES))
 
 
 def _needs_hermetic_settings(item: pytest.Item) -> bool:
@@ -71,11 +87,13 @@ def hermetic_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for key in list(os.environ):
         if key.lower() in SETTINGS_ENV_NAMES:
             monkeypatch.delenv(key)
-    monkeypatch.setitem(Settings.model_config, "env_file", None)
-    monkeypatch.setitem(VoiceSettings.model_config, "env_file", None)
+    for settings_cls in HERMETIC_SETTINGS_CLASSES:
+        monkeypatch.setitem(settings_cls.model_config, "env_file", None)
     get_settings.cache_clear()
+    get_executor_settings.cache_clear()
     yield
     get_settings.cache_clear()
+    get_executor_settings.cache_clear()
 
 
 @pytest.fixture(scope="session")
