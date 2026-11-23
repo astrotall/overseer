@@ -3,11 +3,13 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pydantic import SecretStr
 from redis.asyncio import Redis, from_url
 from redis.exceptions import AuthenticationError, RedisError, ResponseError
 from sqlalchemy.engine import make_url
@@ -22,21 +24,58 @@ from sqlalchemy.pool import NullPool
 
 from apps.api.deps import get_confirmation_store
 from apps.api.main import app as fastapi_app
+from apps.voice.config import VoiceSettings
 from libs.confirmations import ConfirmationStore
 from libs.core.config import Settings, get_settings
 from libs.db import models
 from libs.llm import ToolCall
+from libs.schemas.ws import ws_auth_subprotocols
 from libs.tools import init_tool_registry, reset_tool_registry
+
+TEST_API_TOKEN = "overseer-test-token-not-a-secret-0123456789"
+AUTH_HEADERS = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+WS_AUTH_SUBPROTOCOLS = ws_auth_subprotocols(TEST_API_TOKEN)
+
+
+UNIT_TESTS_DIR = Path(__file__).parent / "unit"
+HERMETIC_SETTINGS_FIXTURE = "hermetic_settings"
+
+
+def _settings_env_names(settings_cls: type[Settings] | type[VoiceSettings]) -> set[str]:
+    prefix = str(settings_cls.model_config.get("env_prefix", "")).lower()
+    return {f"{prefix}{name}" for name in settings_cls.model_fields}
+
+
+SETTINGS_ENV_NAMES = _settings_env_names(Settings) | _settings_env_names(VoiceSettings)
+
+
+def _needs_hermetic_settings(item: pytest.Item) -> bool:
+    return (
+        isinstance(item, pytest.Function)
+        and item.path.is_relative_to(UNIT_TESTS_DIR)
+        and HERMETIC_SETTINGS_FIXTURE not in item.fixturenames
+    )
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    if sys.platform == "win32":
-        return
-
     skip = pytest.mark.skip(reason="требует Windows и live-сессии пользователя (apps/executor)")
     for item in items:
-        if item.get_closest_marker("windows") is not None:
+        if sys.platform != "win32" and item.get_closest_marker("windows") is not None:
             item.add_marker(skip)
+        if isinstance(item, pytest.Function) and _needs_hermetic_settings(item):
+            item.fixturenames.insert(0, HERMETIC_SETTINGS_FIXTURE)
+
+
+@pytest.fixture
+def hermetic_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    for key in list(os.environ):
+        if key.lower() in SETTINGS_ENV_NAMES:
+            monkeypatch.delenv(key)
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    monkeypatch.setitem(VoiceSettings.model_config, "env_file", None)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture(scope="session")
@@ -72,6 +111,18 @@ def test_redis_url(settings: Settings) -> str:
     return urlunsplit(parts._replace(path=f"/{test_db}"))
 
 
+def redact_database_url(url: str) -> str:
+    return make_url(url).render_as_string(hide_password=True)
+
+
+def database_unavailable_reason(url: str, exc: BaseException) -> str:
+    password = make_url(url).password
+    detail = str(exc)
+    if password:
+        detail = detail.replace(str(password), "***")
+    return f"Тестовая БД недоступна ({redact_database_url(url)}): {detail}"
+
+
 def redact_redis_url(url: str) -> str:
     parts = urlsplit(url)
     if parts.password is None:
@@ -90,7 +141,7 @@ async def db_engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
         await engine.dispose()
         if os.getenv("CI"):
             raise
-        pytest.skip(f"Тестовая БД недоступна ({test_database_url}): {exc}")
+        pytest.skip(database_unavailable_reason(test_database_url, exc))
 
     yield engine
     await engine.dispose()
@@ -179,9 +230,16 @@ class UnreachableRedis:
         return unreachable
 
 
+def authenticated_settings(**overrides: object) -> Settings:
+    return get_settings().model_copy(
+        update={"api_token": SecretStr(TEST_API_TOKEN), "api_allowed_origins": [], **overrides}
+    )
+
+
 @pytest.fixture
 def app() -> Iterator[FastAPI]:
     init_tool_registry()
+    fastapi_app.dependency_overrides[get_settings] = lambda: authenticated_settings()
     fastapi_app.dependency_overrides[get_confirmation_store] = lambda: ConfirmationStore(
         UnreachableRedis()  # type: ignore[arg-type]  # заглушка вместо клиента Redis
     )
@@ -192,6 +250,14 @@ def app() -> Iterator[FastAPI]:
 
 @pytest.fixture
 async def async_client(app: FastAPI) -> AsyncIterator[AsyncClient]:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", headers=AUTH_HEADERS
+    ) as client:
+        yield client
+
+
+@pytest.fixture
+async def anonymous_client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
 

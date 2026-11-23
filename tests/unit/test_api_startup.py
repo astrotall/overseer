@@ -11,6 +11,7 @@ from libs.core.config import Settings
 from libs.core.exceptions import ConfigurationError
 from libs.tools import OpenPageTool, WebSearchTool, get_tool_registry
 from libs.tools.registry import ToolRegistry
+from tests.conftest import TEST_API_TOKEN
 
 
 def test_api_startup_fails_fast_when_active_provider_key_missing(
@@ -46,7 +47,9 @@ class FailingToolRegistry(ToolRegistry):
 def test_api_shutdown_closes_resources_when_tool_registration_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = Settings(llm_provider="deepseek", deepseek_api_key="test-key")
+    settings = Settings(
+        llm_provider="deepseek", deepseek_api_key="test-key", api_token=TEST_API_TOKEN
+    )
     monkeypatch.setattr("apps.api.main.get_settings", lambda: settings)
     monkeypatch.setattr("apps.api.main.validate_llm_provider_key", lambda _settings: None)
     monkeypatch.setattr("apps.api.main.configure_logging", lambda _settings: None)
@@ -82,7 +85,9 @@ def test_api_shutdown_closes_resources_when_tool_registration_fails(
 
 
 def test_api_startup_registers_the_browser_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = Settings(llm_provider="deepseek", deepseek_api_key="test-key")
+    settings = Settings(
+        llm_provider="deepseek", deepseek_api_key="test-key", api_token=TEST_API_TOKEN
+    )
     monkeypatch.setattr("apps.api.main.get_settings", lambda: settings)
     monkeypatch.setattr("apps.api.main.validate_llm_provider_key", lambda _settings: None)
     monkeypatch.setattr("apps.api.main.configure_logging", lambda _settings: None)
@@ -101,3 +106,22 @@ def test_api_startup_registers_the_browser_tools(monkeypatch: pytest.MonkeyPatch
         assert isinstance(registry.get("web_search"), WebSearchTool)
         assert isinstance(registry.get("open_page"), OpenPageTool)
         assert {spec.name for spec in registry.list_specs()} == {"echo", "web_search", "open_page"}
+
+
+def test_api_startup_refuses_a_missing_token_before_touching_infrastructure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(llm_provider="deepseek", deepseek_api_key="test-key", api_token=None)
+    monkeypatch.setattr("apps.api.main.get_settings", lambda: settings)
+
+    def untouchable(_settings: Settings) -> None:
+        raise AssertionError("инфраструктуру трогать нельзя, пока токен не проверен")
+
+    monkeypatch.setattr("apps.api.main.init_engine", untouchable)
+    monkeypatch.setattr("apps.api.main.init_redis", untouchable)
+    monkeypatch.setattr("apps.api.main.configure_logging", untouchable)
+
+    app = FastAPI(lifespan=lifespan)
+
+    with pytest.raises(ConfigurationError, match="API_TOKEN"), TestClient(app):
+        pass

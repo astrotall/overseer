@@ -12,12 +12,17 @@ from typing import Any
 
 import numpy as np
 import pytest
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response
 
 from apps.voice.audio import Int16Frame
+from apps.voice.config import VoiceSettings
 from apps.voice.confirmations import (
     ConfirmationAPI,
     ConfirmationError,
     ConfirmationGoneError,
+    ConfirmationUnauthorizedError,
     Resolution,
 )
 from apps.voice.cues import CueKind
@@ -31,6 +36,7 @@ from apps.voice.state import VoiceState, VoiceStateMachine
 from apps.voice.stt import Segment, Transcription
 from apps.voice.vad import EndpointOutcome
 from apps.voice.ws_client import (
+    ACCESS_DENIED_SPEECH,
     CONFIRMATION_ATTEMPTS,
     CONFIRMATION_CHAIN_LIMIT,
     CONFIRMATION_CHAIN_SPEECH,
@@ -44,14 +50,19 @@ from apps.voice.ws_client import (
     RECONNECT_MAX_S,
     ListenRequest,
     VoiceWSClient,
+    WSAccessDeniedError,
     WSConnection,
+    authenticated_connector,
     build_url,
     listening_unavailable,
     next_delay,
 )
+from libs.core.exceptions import ConfigurationError
 from libs.schemas.chat import ConfirmationRequiredResponse
+from libs.schemas.ws import WS_SUBPROTOCOL
 
-URL = "ws://localhost:8000/ws/chat"
+URL = "ws://127.0.0.1:8000/ws/chat"
+TOKEN = "voice-test-token-not-a-secret-0123456789"
 FIRST_EPOCH = 1
 SECOND_EPOCH = 3
 
@@ -909,6 +920,18 @@ class TestConfirmation:
 
         assert rig.speaker.spoken[-1] == CONFIRMATION_FAILED_SPEECH
 
+    async def test_a_refused_token_on_the_answer_is_spoken_as_such(self) -> None:
+        api = FakeConfirmations(ConfirmationUnauthorizedError())
+        rig = confirmation_rig("да", confirmations=api)
+
+        async with running(rig.client) as task:
+            await rig.ask()
+            await eventually(lambda: len(rig.speaker.spoken) == 2)
+
+            assert not task.done()
+
+        assert rig.speaker.spoken[-1] == ACCESS_DENIED_SPEECH
+
     async def test_an_expired_confirmation_is_spoken_apart_from_a_failure(self) -> None:
         rig = confirmation_rig("да", confirmations=FakeConfirmations(ConfirmationGoneError()))
 
@@ -1011,3 +1034,59 @@ class TestConfirmation:
             rig.state.set(VoiceState.THINKING)
             await eventually(lambda: rig.api.calls)
             await eventually(lambda: rig.state.state is VoiceState.IDLE)
+
+
+def refused(status: int) -> InvalidStatus:
+    return InvalidStatus(Response(status, "refused", Headers(), b""))
+
+
+class TestAuthentication:
+    def test_the_connector_offers_the_protocol_and_the_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        def fake_connect(url: str, **kwargs: Any) -> Any:
+            calls.append((url, kwargs))
+            return contextlib.nullcontext()
+
+        monkeypatch.setattr("apps.voice.ws_client.connect", fake_connect)
+
+        authenticated_connector(TOKEN)(URL)
+
+        assert calls == [(URL, {"subprotocols": [WS_SUBPROTOCOL, f"overseer.token.{TOKEN}"]})]
+        assert "origin" not in calls[0][1]
+
+    def test_the_client_built_from_settings_requires_a_token(self) -> None:
+        with pytest.raises(ConfigurationError, match="VOICE_API_TOKEN"):
+            VoiceWSClient.from_settings(
+                VoiceSettings(_env_file=None, api_token=None),  # type: ignore[call-arg]
+                transcripts=asyncio.Queue(),
+                speaker=FakeSpeaker(),
+                state=VoiceStateMachine(),
+            )
+
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_a_refused_handshake_is_said_once_and_stops_the_client(self, status: int) -> None:
+        connector = FakeConnector(refused(status), FakeConnection())
+        speaker = FakeSpeaker()
+        client = make_client(connector, speaker=speaker)
+
+        with pytest.raises(WSAccessDeniedError):
+            await asyncio.wait_for(client.run(), timeout=2.0)
+
+        assert connector.urls == [URL]
+        assert speaker.spoken == [ACCESS_DENIED_SPEECH]
+        assert not client.gate.is_open
+
+    async def test_a_server_error_on_the_handshake_is_still_retried(self) -> None:
+        connection = FakeConnection()
+        connector = FakeConnector(refused(503), connection)
+        client = make_client(connector)
+
+        async with running(client) as task:
+            await eventually(lambda: client.epoch == FIRST_EPOCH)
+
+            assert not task.done()
+
+        assert connector.urls == [URL, URL]

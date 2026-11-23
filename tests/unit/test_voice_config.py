@@ -11,8 +11,10 @@ from apps.voice.config import (
     MODEL_CACHE_DIR,
     URL_DIGEST_CHARS,
     VoiceSettings,
+    require_api_token,
 )
 from apps.voice.wake_word import phrase_to_model_name
+from libs.core.exceptions import ConfigurationError
 
 
 def test_wake_word_phrase_has_a_default_backed_by_a_ready_made_model() -> None:
@@ -187,3 +189,24 @@ def test_an_explicit_api_address_wins_over_the_socket_one() -> None:
 def test_an_answer_timeout_below_the_longest_utterance_is_rejected() -> None:
     with pytest.raises(ValidationError, match="confirmation_answer_timeout_s"):
         VoiceSettings(vad_max_utterance_s=30.0, confirmation_answer_timeout_s=20.0)
+
+
+def test_the_socket_address_defaults_to_the_ipv4_loopback() -> None:
+    assert VoiceSettings(_env_file=None).ws_url == "ws://127.0.0.1:8000/ws/chat"  # type: ignore[call-arg]
+
+
+def test_the_api_token_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VOICE_API_TOKEN", "voice-test-token-not-a-secret-0123456789")
+
+    settings = VoiceSettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert require_api_token(settings) == "voice-test-token-not-a-secret-0123456789"
+    assert "voice-test-token" not in repr(settings)
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_a_blank_api_token_means_unset(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("VOICE_API_TOKEN", value)
+
+    with pytest.raises(ConfigurationError, match="VOICE_API_TOKEN"):
+        require_api_token(VoiceSettings(_env_file=None))  # type: ignore[call-arg]

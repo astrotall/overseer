@@ -9,7 +9,7 @@ from typing import Final, Protocol, TypeVar
 import httpx
 from pydantic import ValidationError
 
-from apps.voice.config import VoiceSettings
+from apps.voice.config import VoiceSettings, require_api_token
 from libs.core.exceptions import ExternalServiceError
 from libs.core.logging import get_logger
 from libs.schemas.chat import ConfirmationRequiredResponse, MessageResponse
@@ -100,6 +100,10 @@ class ConfirmationGoneError(ConfirmationError):
     default_message = "Подтверждение больше не действует"
 
 
+class ConfirmationUnauthorizedError(ConfirmationError):
+    default_message = "API отклонил токен голосового клиента"
+
+
 class ConfirmationAPI(Protocol):
     async def resolve(self, confirmation_id: uuid.UUID, *, approved: bool) -> Resolution: ...
 
@@ -109,18 +113,20 @@ class HTTPConfirmationAPI:
         self,
         base_url: str,
         *,
+        token: str,
         timeout: float = REQUEST_TIMEOUT_S,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
+            headers={"Authorization": f"Bearer {token}"},
             timeout=timeout,
             transport=transport,
         )
 
     @classmethod
     def from_settings(cls, settings: VoiceSettings) -> HTTPConfirmationAPI:
-        return cls(settings.api_base_url)
+        return cls(settings.api_base_url, token=require_api_token(settings))
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -155,6 +161,8 @@ class HTTPConfirmationAPI:
             return Resolution(pending=self._parse(response, ConfirmationRequiredResponse))
         if response.status_code == httpx.codes.OK:
             return Resolution(reply=self._parse(response, MessageResponse).content)
+        if response.status_code == httpx.codes.UNAUTHORIZED:
+            raise ConfirmationUnauthorizedError()
         if response.status_code in {httpx.codes.NOT_FOUND, httpx.codes.CONFLICT}:
             raise ConfirmationGoneError(
                 f"Подтверждение {confirmation_id} не принято: {response.status_code}"

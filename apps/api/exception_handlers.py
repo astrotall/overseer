@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
+from apps.api.auth import WebSocketAccessDeniedError, websocket_access_denied_handler
 from libs.confirmations import ConfirmationRequiredError
 from libs.core.exceptions import LLMBadRequestError, LLMError, LLMResponseError, LLMTransientError
 from libs.schemas.chat import ConfirmationRequiredResponse
@@ -45,3 +46,4 @@ def register_exception_handlers(app: FastAPI) -> None:
     for exc_type in LLM_ERROR_STATUS_CODES:
         app.add_exception_handler(exc_type, llm_error_handler)
     app.add_exception_handler(ConfirmationRequiredError, confirmation_required_handler)
+    app.add_exception_handler(WebSocketAccessDeniedError, websocket_access_denied_handler)

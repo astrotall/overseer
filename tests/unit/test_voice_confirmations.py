@@ -5,20 +5,24 @@ import uuid
 import httpx
 import pytest
 
+from apps.voice.config import VoiceSettings
 from apps.voice.confirmations import (
     ConfirmationError,
     ConfirmationGoneError,
+    ConfirmationUnauthorizedError,
     Decision,
     HTTPConfirmationAPI,
     classify,
 )
+from libs.core.exceptions import ConfigurationError
 
 CONFIRMATION_ID = uuid.UUID("11111111-2222-3333-4444-555555555555")
+TOKEN = "voice-test-token-not-a-secret-0123456789"
 
 
 def api(handler: object) -> HTTPConfirmationAPI:
     transport = httpx.MockTransport(handler)  # type: ignore[arg-type]
-    return HTTPConfirmationAPI("http://localhost:8000", transport=transport)
+    return HTTPConfirmationAPI("http://127.0.0.1:8000", token=TOKEN, transport=transport)
 
 
 class TestClassify:
@@ -146,6 +150,32 @@ class TestResolve:
 
         with pytest.raises(ConfirmationError):
             await api(handler).resolve(CONFIRMATION_ID, approved=True)
+
+    async def test_every_request_carries_the_bearer_token(self) -> None:
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("authorization"))
+            return httpx.Response(200, json={"role": "assistant", "content": "Готово."})
+
+        client = api(handler)
+        await client.resolve(CONFIRMATION_ID, approved=True)
+        await client.resolve(CONFIRMATION_ID, approved=False)
+
+        assert seen == [f"Bearer {TOKEN}", f"Bearer {TOKEN}"]
+
+    async def test_a_refused_token_is_told_apart_from_other_failures(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"detail": "Требуется аутентификация"})
+
+        with pytest.raises(ConfirmationUnauthorizedError) as caught:
+            await api(handler).resolve(CONFIRMATION_ID, approved=True)
+
+        assert TOKEN not in str(caught.value)
+
+    def test_the_client_built_from_settings_requires_a_token(self) -> None:
+        with pytest.raises(ConfigurationError, match="VOICE_API_TOKEN"):
+            HTTPConfirmationAPI.from_settings(VoiceSettings(_env_file=None, api_token=None))  # type: ignore[call-arg]
 
     async def test_the_client_closes_its_connections(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

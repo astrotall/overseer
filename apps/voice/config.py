@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Final, Self
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from libs.core.exceptions import ConfigurationError
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 MODEL_CACHE_DIR: Final[Path] = Path.home() / ".cache" / "overseer" / "tts"
@@ -25,6 +27,7 @@ class VoiceSettings(BaseSettings):
         env_prefix="VOICE_",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     wake_word_phrase: str = Field(
@@ -147,10 +150,10 @@ class VoiceSettings(BaseSettings):
         ),
     )
     ws_url: str = Field(
-        default="ws://localhost:8000/ws/chat",
+        default="ws://127.0.0.1:8000/ws/chat",
         description=(
-            "Адрес /ws/chat: тот же конверт, что у любого другого клиента. Локальная "
-            "разработка целится в apps/api на API_HOST/API_PORT"
+            "Адрес /ws/chat: тот же конверт, что у любого другого клиента. 127.0.0.1, а не "
+            "localhost: API опубликован только на IPv4-loopback (OVE-61)"
         ),
     )
     conversation_id: uuid.UUID | None = Field(
@@ -175,6 +178,13 @@ class VoiceSettings(BaseSettings):
         description=(
             "Адрес REST API для ответа на подтверждения. Пусто — берётся из ws_url: "
             "та же машина и порт, схема ws → http, wss → https"
+        ),
+    )
+    api_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Тот же токен, что API_TOKEN у apps/api (OVE-61): уходит в Sec-WebSocket-Protocol "
+            "сокета и в Authorization REST-запросов подтверждения. Без него клиент не стартует"
         ),
     )
     confirmation_answer_timeout_s: float = Field(
@@ -232,6 +242,7 @@ class VoiceSettings(BaseSettings):
         "output_device",
         "conversation_id",
         "api_url",
+        "api_token",
         mode="before",
     )
     @classmethod
@@ -273,6 +284,15 @@ class VoiceSettings(BaseSettings):
             )
 
         return self
+
+
+def require_api_token(settings: VoiceSettings) -> str:
+    if settings.api_token is None:
+        raise ConfigurationError(
+            "VOICE_API_TOKEN не задан — обязателен: apps/api без токена отклоняет и сокет, и "
+            "запросы подтверждения. Значение — то же, что API_TOKEN у apps/api"
+        )
+    return settings.api_token.get_secret_value()
 
 
 @lru_cache(maxsize=1)

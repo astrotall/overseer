@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from apps.api.exception_handlers import register_exception_handlers
 from apps.api.routes import api_router
 from libs.browser import BrowserSessionManager, init_browser_manager, reset_browser_manager
-from libs.core.config import get_settings, validate_llm_provider_key
+from libs.core.config import get_settings, validate_api_token, validate_llm_provider_key
 from libs.core.logging import configure_logging, get_logger
 from libs.db.redis import close_redis, init_redis
 from libs.db.session import close_engine, init_engine
@@ -33,6 +33,7 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     validate_llm_provider_key(settings)
+    validate_api_token(settings)
     configure_logging(settings)
 
     llm_client: LLMClient | None = None

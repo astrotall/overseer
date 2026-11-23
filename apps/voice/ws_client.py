@@ -10,19 +10,22 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from pydantic import TypeAdapter, ValidationError
 from websockets.asyncio.client import connect
-from websockets.exceptions import WebSocketException
+from websockets.exceptions import InvalidStatus, WebSocketException
+from websockets.typing import Subprotocol
 
-from apps.voice.config import VoiceSettings
+from apps.voice.config import VoiceSettings, require_api_token
 from apps.voice.confirmations import (
     ConfirmationAPI,
     ConfirmationError,
     ConfirmationGoneError,
+    ConfirmationUnauthorizedError,
     Decision,
     classify,
 )
 from apps.voice.listener import UNSET_EPOCH
 from apps.voice.pipeline import Transcript
 from apps.voice.state import ConnectionGate, VoiceState, VoiceStateMachine
+from libs.core.exceptions import ConfigurationError
 from libs.core.logging import get_logger
 from libs.schemas.chat import ConfirmationRequiredResponse, SendMessageRequest
 from libs.schemas.ws import (
@@ -30,6 +33,7 @@ from libs.schemas.ws import (
     WSIncomingMessage,
     WSReplyMessage,
     WSServerMessage,
+    ws_auth_subprotocols,
 )
 
 logger = get_logger(__name__)
@@ -47,6 +51,10 @@ CONFIRMATION_GAVE_UP_SPEECH: Final[str] = "Так и не понял ответ.
 CONFIRMATION_FAILED_SPEECH: Final[str] = "Не удалось передать ваш ответ агенту."
 CONFIRMATION_GONE_SPEECH: Final[str] = "Подтверждение больше не действует."
 CONFIRMATION_CHAIN_SPEECH: Final[str] = "Слишком много подтверждений подряд, останавливаюсь."
+ACCESS_DENIED_SPEECH: Final[str] = (
+    "Агент отклонил ключ доступа голосового клиента. Проверьте VOICE_API_TOKEN."
+)
+ACCESS_DENIED_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
 CONFIRMATION_ATTEMPTS: Final[int] = 2
 CONFIRMATION_CHAIN_LIMIT: Final[int] = 5
 ANSWER_TIMEOUT_S: Final[float] = 45.0
@@ -75,8 +83,17 @@ class WSConnection(Protocol):
 Connector = Callable[[str], AbstractAsyncContextManager[WSConnection]]
 
 
-def websocket_connector(url: str) -> AbstractAsyncContextManager[WSConnection]:
-    return connect(url)
+class WSAccessDeniedError(ConfigurationError):
+    default_message = "API отклонил подключение голосового клиента: неверный VOICE_API_TOKEN"
+
+
+def authenticated_connector(token: str) -> Connector:
+    subprotocols = [Subprotocol(value) for value in ws_auth_subprotocols(token)]
+
+    def connector(url: str) -> AbstractAsyncContextManager[WSConnection]:
+        return connect(url, subprotocols=subprotocols)
+
+    return connector
 
 
 def build_url(url: str, conversation_id: uuid.UUID | None) -> str:
@@ -108,9 +125,9 @@ class VoiceWSClient:
         transcripts: asyncio.Queue[Transcript],
         speaker: Speaker,
         state: VoiceStateMachine,
+        connector: Connector,
         conversation_id: uuid.UUID | None = None,
         gate: ConnectionGate | None = None,
-        connector: Connector = websocket_connector,
         reconnect_initial_s: float = RECONNECT_INITIAL_S,
         reconnect_max_s: float = RECONNECT_MAX_S,
         confirmations: ConfirmationAPI | None = None,
@@ -159,6 +176,7 @@ class VoiceWSClient:
             transcripts=transcripts,
             speaker=speaker,
             state=state,
+            connector=authenticated_connector(require_api_token(settings)),
             conversation_id=settings.conversation_id,
             reconnect_initial_s=settings.ws_reconnect_initial_s,
             reconnect_max_s=settings.ws_reconnect_max_s,
@@ -199,13 +217,15 @@ class VoiceWSClient:
                 self._gate.open()
                 logger.info("voice.ws_connected", url=self._url, epoch=self._epoch)
                 await self._serve(connection)
+        except InvalidStatus as exc:
+            if exc.response.status_code not in ACCESS_DENIED_STATUSES:
+                self._log_disconnect(exc)
+            else:
+                logger.error("voice.ws_access_denied", status=exc.response.status_code)
+                await self._speaker.speak(ACCESS_DENIED_SPEECH)
+                raise WSAccessDeniedError() from exc
         except TRANSPORT_ERRORS as exc:
-            logger.warning(
-                "voice.ws_disconnected",
-                epoch=self._epoch,
-                error=type(exc).__name__,
-                detail=str(exc),
-            )
+            self._log_disconnect(exc)
         except Exception:
             logger.exception("voice.ws_failed", epoch=self._epoch)
         else:
@@ -218,6 +238,14 @@ class VoiceWSClient:
             self._release_turn()
 
         return connected
+
+    def _log_disconnect(self, exc: Exception) -> None:
+        logger.warning(
+            "voice.ws_disconnected",
+            epoch=self._epoch,
+            error=type(exc).__name__,
+            detail=str(exc),
+        )
 
     async def _serve(self, connection: WSConnection) -> None:
         sender = asyncio.create_task(self._send_loop(connection), name="voice-ws-send")
@@ -416,6 +444,14 @@ class VoiceWSClient:
                 detail=exc.message,
             )
             await self._speaker.speak(CONFIRMATION_GONE_SPEECH)
+            return None
+        except ConfirmationUnauthorizedError:
+            logger.error(
+                "voice.confirmation_unauthorized",
+                epoch=self._epoch,
+                confirmation_id=str(confirmation_id),
+            )
+            await self._speaker.speak(ACCESS_DENIED_SPEECH)
             return None
         except ConfirmationError as exc:
             logger.warning(
